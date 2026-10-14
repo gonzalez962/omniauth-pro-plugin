@@ -1,0 +1,13 @@
+# Binaries and shared libraries
+*.so
+*.dylib
+*.dll
+
+# Generated headers from cgo / build artifacts
+*.h
+!cliproxy_plugin.h
+
+# Backup and temp files
+*.bak
+*.tmp
+.atl/
