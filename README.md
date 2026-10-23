@@ -4,6 +4,16 @@
 
 Permite conectar, rotar y administrar múltiples cuentas de diversos proveedores de IA desde una interfaz unificada dentro del panel de administración de CPAMC.
 
+## Características Principales
+
+- 🔐 **Multi-Account Hub**: Gestión unificada de múltiples cuentas por proveedor con persistencia segura en disco y enmascaramiento de claves (`key_mask`).
+- 🔄 **Descubrimiento de Modelos (Model Discovery)**:
+  - **Manual**: Cada tarjeta de cuenta incluye un botón para consultar y visualizar en un modal dedicado los identificadores de modelos reales soportados por el proveedor.
+  - **Automático**: Al vincular y guardar una nueva cuenta o clave, se inicia automáticamente el descubrimiento de modelos en el modal sin requerir interacción manual.
+  - **Presentación en Modal (S3)**: Los modelos se visualizan en un diálogo modal por cuenta con acciones de cierre y actualización; las tarjetas de cuentas se mantienen limpias e intactas. Incluye protección contra condiciones de carrera ante respuestas tardías de diferentes cuentas.
+  - **Caché Persistente en Credenciales (S4)**: Las consultas exitosas persisten la lista de modelos dentro del objeto `model_cache` del JSON de credenciales de la cuenta junto con su timestamp (`updated_at`), preservando todos los campos existentes y permisos de archivo mediante reemplazo atómico. Se decodifican enteros grandes (>2^53) usando `UseNumber` para evitar truncamiento float64. Las consultas subsecuentes se sirven instantáneamente desde la caché local sin llamadas salientes; el botón de actualización (`refresh=true`) actualiza la caché desde el proveedor.
+  - **Seguridad y Sincronización en Backend**: Endpoint additive `/v0/management/hub/accounts/models` (GET/POST) que opera del lado del servidor sin exponer credenciales al navegador, soporta parámetro `refresh` explícito, rechaza identificadores inseguros (path traversal), previene resurrección de cuentas eliminadas durante I/O de red, y aplica límites estrictos de tamaño de respuesta (2MB) y timeout. Las secciones críticas de lectura/escritura en disco están serializadas mediante un mutex en memoria para evitar colisiones entre adiciones, eliminaciones y guardado de caché sin retener bloqueos durante llamadas de red. Para modificaciones externas (fuera del proceso), la verificación de identidad de credenciales (API key, base URL y provider) previa al guardado descarta resultados obsoletos sin alterar el archivo ni restaurar datos desactualizados.
+
 ## Proveedores Soportados
 
 - 🔷 **Google (Gemini 4 Argon)** - Inferencia oficial vía Google AI Studio / API compatible.
@@ -121,3 +131,9 @@ O dentro de Docker (sin dependencias en el host):
 docker run --rm -v "$(pwd):/src" -w /src golang:1.22 go test -v ./...
 ```
 *(En Windows Git Bash, anteponé `MSYS_NO_PATHCONV=1` al comando).*
+
+Para ejecutar las pruebas de comportamiento de la interfaz embebida (Node.js built-in test runner):
+
+```bash
+node --test ui_models_test.js
+```
