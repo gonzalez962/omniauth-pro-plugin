@@ -773,6 +773,16 @@ func handleAccountsAPI(method string, req ManagementRequestPayload) ([]byte, err
 
 		case "openai-compat", "custom":
 			filePrefix = "openai-compat"
+			if baseURL == "" {
+				resBytes, _ := json.Marshal(map[string]any{"ok": false, "error": "La Base URL de la API es obligatoria para cuentas OpenAI Compatible"})
+				resp := ManagementResponsePayload{
+					StatusCode: http.StatusBadRequest,
+					Headers:    map[string][]string{"Content-Type": {"application/json"}},
+					Body:       base64.StdEncoding.EncodeToString(resBytes),
+				}
+				raw, _ := json.Marshal(resp)
+				return okEnvelope(raw), nil
+			}
 			if label == "" {
 				label = "OpenAI Compatible Account"
 			}
@@ -783,9 +793,7 @@ func handleAccountsAPI(method string, req ManagementRequestPayload) ([]byte, err
 			accountData["provider"] = "openai-compatible"
 			accountData["label"] = label
 			accountData["prefix"] = prefix
-			if baseURL != "" {
-				accountData["base_url"] = baseURL
-			}
+			accountData["base_url"] = baseURL
 
 		default: // opencode-go
 			filePrefix = "opencode-go"
@@ -881,8 +889,22 @@ func handleAccountsAPI(method string, req ManagementRequestPayload) ([]byte, err
 	return okEnvelope(raw), nil
 }
 
+var (
+	accountsHTMLOnce sync.Once
+	accountsHTMLData string
+)
+
 func getAccountsHTML() string {
-	return `<!DOCTYPE html>
+	accountsHTMLOnce.Do(func() {
+		raw := accountsHTMLTemplate
+		raw = strings.Replace(raw, "__DEEPSEEK_LOGO_BASE64__", deepseekLogoBase64, 1)
+		raw = strings.Replace(raw, "__GEMINI_ARGON_LOGO_BASE64__", geminiArgonLogoBase64, 1)
+		accountsHTMLData = raw
+	})
+	return accountsHTMLData
+}
+
+const accountsHTMLTemplate = `<!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8">
@@ -1492,7 +1514,7 @@ func getAccountsHTML() string {
 
           <div class="form-group">
             <label id="apiKeyLabel">API Key de DeepSeek (sk-...)</label>
-            <input type="password" id="apiKey" class="form-control" placeholder="sk-..." required />
+            <input type="password" id="apiKey" class="form-control" placeholder="sk-..." autocomplete="off" required />
           </div>
 
           <!-- Selector de Logo Personalizado -->
@@ -1523,8 +1545,8 @@ func getAccountsHTML() string {
           </div>
 
           <div class="form-group" id="baseUrlGroup" style="display:none;">
-            <label>Base URL Personalizada (Opcional)</label>
-            <input type="text" id="baseUrl" class="form-control" placeholder="https://api.ejemplo.com/v1" />
+            <label id="baseUrlLabel">Base URL de la API (Obligatoria)</label>
+            <input type="text" id="baseUrl" class="form-control" placeholder="https://api.ejemplo.com/v1" autocomplete="off" />
           </div>
 
           <button type="submit" class="btn-3d">
@@ -1561,6 +1583,8 @@ func getAccountsHTML() string {
   </div>
 
   <script>
+    const deepseekLogoBase64 = "__DEEPSEEK_LOGO_BASE64__";
+    const geminiArgonLogoBase64 = "__GEMINI_ARGON_LOGO_BASE64__";
     const apiUrl = "/v0/management/hub/accounts";
     let allAccounts = [];
     let currentFilter = "all";
@@ -1595,10 +1619,7 @@ func getAccountsHTML() string {
 
     function updateCustomLogoPreview(logoSrc) {
       document.getElementById("finalCustomLogo").value = logoSrc;
-      const previewImg = document.querySelector("#providerPreview .preview-logo-box img");
-      if (previewImg && logoSrc) {
-        previewImg.src = logoSrc;
-      }
+      onProviderChange();
     }
 
     function getProviderLogo(provider, customLogo) {
@@ -1627,29 +1648,33 @@ func getAccountsHTML() string {
       const keyInput = document.getElementById("apiKey");
       const prefixGroup = document.getElementById("prefixGroup");
       const baseUrlGroup = document.getElementById("baseUrlGroup");
+      const baseUrlInput = document.getElementById("baseUrl");
+      const baseUrlLabel = document.getElementById("baseUrlLabel");
       const preview = document.getElementById("providerPreview");
-      const customLogo = document.getElementById("finalCustomLogo").value;
+      const customLogo = (document.getElementById("finalCustomLogo").value || "").trim();
 
-      let defaultLogo = deepseekLogoBase64;
+      if (baseUrlInput) baseUrlInput.required = false;
+
+      let logoBoxHtml = "";
       let title = "DeepSeek Oficial";
       let desc = "Acceso directo a api.deepseek.com para deepseek-chat (V3) y deepseek-reasoner (R1)";
 
       if (p === "gemini") {
-        defaultLogo = geminiArgonLogoBase64;
         title = "Google (Gemini 4 Argon)";
         desc = "Inferencia multimodal de vanguardia y modelos 2.0/1.5 Pro en Google AI Studio";
         keyLabel.textContent = "API Key de Google (Gemini 4 Argon / AIzaSy...)";
         keyInput.placeholder = "AIzaSy...";
         prefixGroup.style.display = "none";
         baseUrlGroup.style.display = "none";
+        logoBoxHtml = '<div class="preview-logo-box"><img src="' + geminiArgonLogoBase64 + '" alt="Google (Gemini 4 Argon)" /></div>';
       } else if (p === "deepseek") {
-        defaultLogo = deepseekLogoBase64;
         title = "DeepSeek Oficial";
         desc = "Acceso directo a api.deepseek.com para deepseek-chat (V3) y deepseek-reasoner (R1)";
         keyLabel.textContent = "API Key de DeepSeek (sk-...)";
         keyInput.placeholder = "sk-...";
         prefixGroup.style.display = "none";
         baseUrlGroup.style.display = "none";
+        logoBoxHtml = '<div class="preview-logo-box"><img src="' + deepseekLogoBase64 + '" alt="DeepSeek" /></div>';
       } else if (p === "nvidia") {
         title = "NVIDIA NIM";
         desc = "Catálogo de microservicios de inferencia empresarial con 1,000 créditos gratis";
@@ -1657,6 +1682,7 @@ func getAccountsHTML() string {
         keyInput.placeholder = "nvapi-...";
         prefixGroup.style.display = "none";
         baseUrlGroup.style.display = "none";
+        logoBoxHtml = '<div class="preview-logo-box" style="font-size:1.8rem;">🟢</div>';
       } else if (p === "nan") {
         title = "NaN Builders";
         desc = "Inferencia ultrarrápida europea de código abierto (DeepSeek, GLM, MiMo, Qwen)";
@@ -1664,6 +1690,7 @@ func getAccountsHTML() string {
         keyInput.placeholder = "API Key personal de nan.builders...";
         prefixGroup.style.display = "none";
         baseUrlGroup.style.display = "none";
+        logoBoxHtml = '<div class="preview-logo-box" style="font-size:1.8rem;">🟣</div>';
       } else if (p === "groq") {
         title = "Groq Cloud";
         desc = "LPU de latencia ultra baja para Llama 3.3 70B y Mixtral";
@@ -1671,6 +1698,7 @@ func getAccountsHTML() string {
         keyInput.placeholder = "gsk_...";
         prefixGroup.style.display = "none";
         baseUrlGroup.style.display = "none";
+        logoBoxHtml = '<div class="preview-logo-box" style="font-size:1.8rem;">⚡</div>';
       } else if (p === "cerebras") {
         title = "Cerebras AI";
         desc = "Inferencia Wafer-Scale masiva a ultra alta velocidad (>1500 tokens/s)";
@@ -1678,6 +1706,7 @@ func getAccountsHTML() string {
         keyInput.placeholder = "csk-...";
         prefixGroup.style.display = "none";
         baseUrlGroup.style.display = "none";
+        logoBoxHtml = '<div class="preview-logo-box" style="font-size:1.8rem;">🧠</div>';
       } else if (p === "mistral") {
         title = "Mistral AI";
         desc = "Modelos Mistral Large 2, Codestral y Pixtral de última generación";
@@ -1685,6 +1714,7 @@ func getAccountsHTML() string {
         keyInput.placeholder = "API Key de Mistral...";
         prefixGroup.style.display = "none";
         baseUrlGroup.style.display = "none";
+        logoBoxHtml = '<div class="preview-logo-box" style="font-size:1.8rem;">🌪️</div>';
       } else if (p === "openai-compat") {
         title = "OpenAI Compatible";
         desc = "Cualquier servidor o gateway local / remoto con formato OpenAI";
@@ -1692,6 +1722,9 @@ func getAccountsHTML() string {
         keyInput.placeholder = "sk-...";
         prefixGroup.style.display = "block";
         baseUrlGroup.style.display = "block";
+        if (baseUrlInput) baseUrlInput.required = true;
+        if (baseUrlLabel) baseUrlLabel.textContent = "Base URL de la API (Obligatoria)";
+        logoBoxHtml = '<div class="preview-logo-box" style="font-size:1.8rem;">⚙️</div>';
       } else {
         title = "OpenCode Go (Zen API)";
         desc = "Pool de modelos de programación e investigación de élite";
@@ -1699,10 +1732,14 @@ func getAccountsHTML() string {
         keyInput.placeholder = "oc_sk_...";
         prefixGroup.style.display = "none";
         baseUrlGroup.style.display = "none";
+        logoBoxHtml = '<div class="preview-logo-box" style="font-size:1.8rem;">🌐</div>';
       }
 
-      const activeLogoSrc = customLogo || defaultLogo;
-      preview.innerHTML = '<div class="preview-logo-box"><img src="' + activeLogoSrc + '" alt="Logo" /></div><div><div class="preview-title">' + title + '</div><div class="preview-desc">' + desc + '</div></div>';
+      if (customLogo !== "") {
+        logoBoxHtml = '<div class="preview-logo-box"><img src="' + customLogo + '" alt="Custom Logo" /></div>';
+      }
+
+      preview.innerHTML = logoBoxHtml + '<div><div class="preview-title">' + title + '</div><div class="preview-desc">' + desc + '</div></div>';
     }
 
     function deobfuscateCPAMC(raw) {
@@ -1902,7 +1939,7 @@ func getAccountsHTML() string {
         const data = await res.json();
         if (data.ok) {
           showAlert("Cuenta eliminada correctamente", "success");
-          apiFetch("/v0/management/auth-files/refresh", { method: "POST" }).catch(() => {});
+          apiFetch("/v0/management/auth-files/refresh?all=true", { method: "POST", body: JSON.stringify({ all: true }) }).catch(() => {});
           loadAccounts();
         } else {
           showAlert(data.error || "Error al eliminar", "error");
@@ -1920,6 +1957,12 @@ func getAccountsHTML() string {
       const prefix = document.getElementById("prefix").value;
       const baseUrl = document.getElementById("baseUrl").value;
       const customLogo = document.getElementById("finalCustomLogo").value;
+
+      if (provider === "openai-compat" && !baseUrl.trim()) {
+        showAlert("La Base URL de la API es obligatoria para cuentas OpenAI Compatible", "error");
+        document.getElementById("baseUrl").focus();
+        return;
+      }
 
       try {
         const res = await apiFetch(apiUrl, {
@@ -1952,7 +1995,7 @@ func getAccountsHTML() string {
           document.getElementById("finalCustomLogo").value = "";
           setLogoTab('default');
           onProviderChange();
-          apiFetch("/v0/management/auth-files/refresh", { method: "POST" }).catch(() => {});
+          apiFetch("/v0/management/auth-files/refresh?all=true", { method: "POST", body: JSON.stringify({ all: true }) }).catch(() => {});
           loadAccounts();
         } else {
           showAlert(data.error || "No se pudo conectar la cuenta", "error");
@@ -1975,7 +2018,6 @@ func getAccountsHTML() string {
   </script>
 </body>
 </html>`
-}
 
 func okEnvelope(result []byte) []byte {
 	raw, _ := json.Marshal(envelope{OK: true, Result: json.RawMessage(result)})
