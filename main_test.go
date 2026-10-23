@@ -498,7 +498,12 @@ func TestFrontendHTMLAndAssets(t *testing.T) {
 		t.Errorf("expected HTML to contain logo source selection tabs")
 	}
 
-	// Verify DeepSeek and Gemini logos are non-empty valid Data URLs
+	// Verify apiKey input has autocomplete="off"
+	if !strings.Contains(html, `id="apiKey" class="form-control" placeholder="sk-..." autocomplete="off" required`) {
+		t.Errorf("expected apiKey input to have autocomplete='off'")
+	}
+
+	// Verify DeepSeek and Gemini logos are non-empty valid Data URLs and embedded into HTML JavaScript
 	if !strings.HasPrefix(deepseekLogoBase64, "data:image/svg+xml;base64,") {
 		t.Errorf("expected deepseekLogoBase64 to be a valid data URI")
 	}
@@ -507,6 +512,20 @@ func TestFrontendHTMLAndAssets(t *testing.T) {
 	}
 	if len(geminiArgonLogoBase64) < 100 {
 		t.Errorf("expected geminiArgonLogoBase64 to have non-trivial content")
+	}
+	if !strings.Contains(html, `const deepseekLogoBase64 = "`+deepseekLogoBase64+`";`) {
+		t.Errorf("expected HTML to define deepseekLogoBase64 constant in JavaScript")
+	}
+	if !strings.Contains(html, `const geminiArgonLogoBase64 = "`+geminiArgonLogoBase64+`";`) {
+		t.Errorf("expected HTML to define geminiArgonLogoBase64 constant in JavaScript")
+	}
+	if strings.Contains(html, "__DEEPSEEK_LOGO_BASE64__") || strings.Contains(html, "__GEMINI_ARGON_LOGO_BASE64__") {
+		t.Errorf("expected HTML placeholders for logos to be fully replaced")
+	}
+
+	// Verify auth-files/refresh uses all=true in query/body
+	if !strings.Contains(html, `/v0/management/auth-files/refresh?all=true`) {
+		t.Errorf("expected HTML JavaScript to refresh auth files with all=true")
 	}
 
 	// Verify that 'otros' filter does not include deepseek or gemini
@@ -633,6 +652,25 @@ func TestBackendAPIValidationAndErrors(t *testing.T) {
 		t.Errorf("expected 400 Bad Request for non-hub file, got %d", respDelNonHub.StatusCode)
 	}
 
+	// 6. POST openai-compat without base_url -> 400 Bad Request
+	reqOpenAINoBase, _ := json.Marshal(ManagementRequestPayload{
+		Method: "POST",
+		Path:   "/v0/management/hub/accounts",
+		Body:   []byte(`{"provider":"openai-compat","api_key":"valid-secret-key-12345"}`),
+	})
+	rawOpenAINoBase, _ := handlePluginMethod("management.handle", reqOpenAINoBase)
+	var envOpenAINoBase envelope
+	json.Unmarshal(rawOpenAINoBase, &envOpenAINoBase)
+	var respOpenAINoBase ManagementResponsePayload
+	json.Unmarshal(envOpenAINoBase.Result, &respOpenAINoBase)
+	if respOpenAINoBase.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request for openai-compat without base_url, got %d", respOpenAINoBase.StatusCode)
+	}
+	bodyOpenAINoBase, _ := base64.StdEncoding.DecodeString(respOpenAINoBase.Body)
+	if !strings.Contains(string(bodyOpenAINoBase), "Base URL") {
+		t.Errorf("expected error message mentioning Base URL, got %s", string(bodyOpenAINoBase))
+	}
+
 	// 6. Invalid HTTP Method (PUT) -> 405 Method Not Allowed
 	reqPut, _ := json.Marshal(ManagementRequestPayload{
 		Method: "PUT",
@@ -668,6 +706,7 @@ func TestStorageAllProvidersAndKeyMasking(t *testing.T) {
 		provider     string
 		apiKey       string
 		label        string
+		baseURL      string
 		expectedPre  string
 		expectedBase string
 		expectedType string
@@ -734,8 +773,9 @@ func TestStorageAllProvidersAndKeyMasking(t *testing.T) {
 			provider:     "openai-compat",
 			apiKey:       "custom_key_1234567890",
 			label:        "Custom OpenAI Endpoint",
+			baseURL:      "https://api.custom-gateway.com/v1",
 			expectedPre:  "custom",
-			expectedBase: "",
+			expectedBase: "https://api.custom-gateway.com/v1",
 			expectedType: "openai-compatible",
 		},
 		{
@@ -751,11 +791,15 @@ func TestStorageAllProvidersAndKeyMasking(t *testing.T) {
 	createdIDs := make([]string, 0, len(cases))
 
 	for _, tc := range cases {
-		payload, _ := json.Marshal(map[string]any{
+		pMap := map[string]any{
 			"provider": tc.provider,
 			"api_key":  tc.apiKey,
 			"label":    tc.label,
-		})
+		}
+		if tc.baseURL != "" {
+			pMap["base_url"] = tc.baseURL
+		}
+		payload, _ := json.Marshal(pMap)
 		req, _ := json.Marshal(ManagementRequestPayload{
 			Method: "POST",
 			Path:   "/v0/management/hub/accounts",
