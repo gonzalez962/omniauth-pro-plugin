@@ -1287,3 +1287,553 @@ func Test_S1_1_ManagementModelDiscovery_BoundedResponse(t *testing.T) {
 	}
 }
 
+func Test_S4_1_PersistentCache_SuccessfulDiscoveryCachesModelsAndPreservesFields(t *testing.T) {
+	tempAuth := t.TempDir()
+	t.Setenv("CLIPROXY_AUTH_DIR", tempAuth)
+
+	upstreamCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+			"object": "list",
+			"data": [
+				{"id": "deepseek-v3", "object": "model"},
+				{"id": "deepseek-r1", "object": "model"}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	accountFile := "deepseek-cache-test.json"
+	targetPath := filepath.Join(tempAuth, accountFile)
+	accountContent := []byte(`{
+		"provider": "deepseek",
+		"type": "deepseek",
+		"label": "DeepSeek Cache Account",
+		"api_key": "sk-secret-preserve-12345",
+		"base_url": "` + server.URL + `",
+		"custom_unrelated_field": "keep-me-safe",
+		"prefix": "ds"
+	}`)
+	if err := os.WriteFile(targetPath, accountContent, 0600); err != nil {
+		t.Fatalf("failed to write initial file: %v", err)
+	}
+
+	// 1. First discovery call (account has no cache yet -> fetches upstream and caches)
+	req1, _ := json.Marshal(ManagementRequestPayload{
+		Method: "POST",
+		Path:   "/v0/management/hub/accounts/models",
+		Body:   []byte(`{"id":"` + accountFile + `"}`),
+	})
+	raw1, err := handlePluginMethod("management.handle", req1)
+	if err != nil {
+		t.Fatalf("discovery 1 error: %v", err)
+	}
+	var env1 envelope
+	json.Unmarshal(raw1, &env1)
+	var resp1 ManagementResponsePayload
+	json.Unmarshal(env1.Result, &resp1)
+
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp1.StatusCode)
+	}
+
+	if upstreamCalls != 1 {
+		t.Fatalf("expected 1 upstream call, got %d", upstreamCalls)
+	}
+
+	// Verify file on disk has cached models, preserved permissions, and preserved custom fields
+	info, err := os.Stat(targetPath)
+	if err != nil {
+		t.Fatalf("failed to stat file: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("expected file mode 0600 to be preserved, got %v", info.Mode().Perm())
+	}
+
+	updatedBytes, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("failed to read updated file: %v", err)
+	}
+	var updatedAccount map[string]any
+	if err := json.Unmarshal(updatedBytes, &updatedAccount); err != nil {
+		t.Fatalf("failed to unmarshal updated file: %v", err)
+	}
+
+	if updatedAccount["custom_unrelated_field"] != "keep-me-safe" {
+		t.Errorf("custom_unrelated_field was not preserved: %v", updatedAccount["custom_unrelated_field"])
+	}
+	if updatedAccount["api_key"] != "sk-secret-preserve-12345" {
+		t.Errorf("api_key was not preserved: %v", updatedAccount["api_key"])
+	}
+
+	cacheObj, ok := updatedAccount["model_cache"].(map[string]any)
+	if !ok || cacheObj == nil {
+		t.Fatalf("expected model_cache object in saved JSON, got: %v", updatedAccount["model_cache"])
+	}
+	modelsList, ok := cacheObj["models"].([]any)
+	if !ok || len(modelsList) != 2 {
+		t.Fatalf("expected 2 models in model_cache.models, got: %v", cacheObj["models"])
+	}
+	if cacheObj["updated_at"] == nil || cacheObj["updated_at"] == "" {
+		t.Errorf("expected non-empty updated_at in model_cache")
+	}
+
+	// 2. Subsequent discovery request (cached read without refresh): MUST NOT call upstream provider
+	req2, _ := json.Marshal(ManagementRequestPayload{
+		Method: "GET",
+		Path:   "/v0/management/hub/accounts/models",
+		Query:  map[string][]string{"id": {accountFile}},
+	})
+	raw2, err := handlePluginMethod("management.handle", req2)
+	if err != nil {
+		t.Fatalf("discovery 2 error: %v", err)
+	}
+	var env2 envelope
+	json.Unmarshal(raw2, &env2)
+	var resp2 ManagementResponsePayload
+	json.Unmarshal(env2.Result, &resp2)
+
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200 on cached read, got %d", resp2.StatusCode)
+	}
+
+	if upstreamCalls != 1 {
+		t.Errorf("expected upstream calls to remain 1 (no network on cached read), got %d", upstreamCalls)
+	}
+
+	var res2 struct {
+		OK     bool     `json:"ok"`
+		Models []string `json:"models"`
+		Cached bool     `json:"cached"`
+	}
+	decoded2, _ := base64.StdEncoding.DecodeString(resp2.Body)
+	json.Unmarshal(decoded2, &res2)
+
+	if !res2.OK || len(res2.Models) != 2 || !res2.Cached {
+		t.Errorf("expected cached=true and 2 models from cached read, got: %+v", res2)
+	}
+}
+
+func Test_S4_2_PersistentCache_RefreshUpdatesPersistedCache(t *testing.T) {
+	tempAuth := t.TempDir()
+	t.Setenv("CLIPROXY_AUTH_DIR", tempAuth)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+			"object": "list",
+			"data": [
+				{"id": "deepseek-new-v4", "object": "model"}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	accountFile := "deepseek-refresh-test.json"
+	targetPath := filepath.Join(tempAuth, accountFile)
+	accountContent := []byte(`{
+		"provider": "deepseek",
+		"type": "deepseek",
+		"label": "DeepSeek Refresh Test",
+		"api_key": "sk-secret-refresh",
+		"base_url": "` + server.URL + `",
+		"model_cache": {
+			"models": ["deepseek-old-v1"],
+			"updated_at": "2024-01-01T00:00:00Z"
+		}
+	}`)
+	os.WriteFile(targetPath, accountContent, 0644)
+
+	// Explicit refresh call with refresh=true
+	reqRefresh, _ := json.Marshal(ManagementRequestPayload{
+		Method: "POST",
+		Path:   "/v0/management/hub/accounts/models",
+		Body:   []byte(`{"id":"` + accountFile + `", "refresh": true}`),
+	})
+	rawRefresh, _ := handlePluginMethod("management.handle", reqRefresh)
+	var env envelope
+	json.Unmarshal(rawRefresh, &env)
+	var resp ManagementResponsePayload
+	json.Unmarshal(env.Result, &resp)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 on refresh, got %d", resp.StatusCode)
+	}
+
+	updatedBytes, _ := os.ReadFile(targetPath)
+	var updatedAccount map[string]any
+	json.Unmarshal(updatedBytes, &updatedAccount)
+
+	cacheObj, ok := updatedAccount["model_cache"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected model_cache object in JSON")
+	}
+	modelsList := cacheObj["models"].([]any)
+	if len(modelsList) != 1 || modelsList[0] != "deepseek-new-v4" {
+		t.Errorf("expected updated model 'deepseek-new-v4', got: %v", modelsList)
+	}
+}
+
+func Test_S4_2_PersistentCache_RefreshFailurePreservesPriorCacheAndCredentials(t *testing.T) {
+	tempAuth := t.TempDir()
+	t.Setenv("CLIPROXY_AUTH_DIR", tempAuth)
+
+	// Provider fails with HTTP 502 Bad Gateway
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte(`{"error": "Upstream unavailable"}`))
+	}))
+	defer server.Close()
+
+	accountFile := "deepseek-fail-test.json"
+	targetPath := filepath.Join(tempAuth, accountFile)
+	initialContent := []byte(`{
+		"provider": "deepseek",
+		"type": "deepseek",
+		"label": "DeepSeek Fail Test",
+		"api_key": "sk-preserve-this-exact-key",
+		"base_url": "` + server.URL + `",
+		"model_cache": {
+			"models": ["stable-model-1", "stable-model-2"],
+			"updated_at": "2024-06-01T00:00:00Z"
+		}
+	}`)
+	os.WriteFile(targetPath, initialContent, 0644)
+
+	// Call with refresh=true
+	req, _ := json.Marshal(ManagementRequestPayload{
+		Method: "GET",
+		Path:   "/v0/management/hub/accounts/models",
+		Query:  map[string][]string{"id": {accountFile}, "refresh": {"true"}},
+	})
+	raw, _ := handlePluginMethod("management.handle", req)
+	var env envelope
+	json.Unmarshal(raw, &env)
+	var resp ManagementResponsePayload
+	json.Unmarshal(env.Result, &resp)
+
+	if resp.StatusCode == http.StatusOK {
+		t.Errorf("expected failure status, got 200")
+	}
+
+	// Verify file on disk is completely preserved
+	contentAfter, _ := os.ReadFile(targetPath)
+	var accAfter map[string]any
+	json.Unmarshal(contentAfter, &accAfter)
+
+	if accAfter["api_key"] != "sk-preserve-this-exact-key" {
+		t.Errorf("api_key was corrupted on failure")
+	}
+	cacheObj, ok := accAfter["model_cache"].(map[string]any)
+	if !ok {
+		t.Fatalf("model_cache was lost on failure")
+	}
+	modelsList := cacheObj["models"].([]any)
+	if len(modelsList) != 2 || modelsList[0] != "stable-model-1" {
+		t.Errorf("prior cache was not preserved on refresh failure: %v", modelsList)
+	}
+}
+
+func Test_S4_Safety_NoResurrectDeletedAccount(t *testing.T) {
+	tempAuth := t.TempDir()
+	t.Setenv("CLIPROXY_AUTH_DIR", tempAuth)
+
+	accountFile := "deepseek-deleted-race.json"
+	targetPath := filepath.Join(tempAuth, accountFile)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Simulate account deletion while request is in flight
+		os.Remove(targetPath)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data": [{"id": "model-1"}]}`))
+	}))
+	defer server.Close()
+
+	initialContent := []byte(`{
+		"provider": "deepseek",
+		"type": "deepseek",
+		"label": "DeepSeek Race",
+		"api_key": "sk-temp",
+		"base_url": "` + server.URL + `"
+	}`)
+	os.WriteFile(targetPath, initialContent, 0644)
+
+	req, _ := json.Marshal(ManagementRequestPayload{
+		Method: "POST",
+		Path:   "/v0/management/hub/accounts/models",
+		Body:   []byte(`{"id":"` + accountFile + `", "refresh": true}`),
+	})
+	handlePluginMethod("management.handle", req)
+
+	// Target path must NOT have been resurrected!
+	if _, err := os.Stat(targetPath); !os.IsNotExist(err) {
+		t.Errorf("expected deleted account NOT to be resurrected after network I/O")
+	}
+}
+
+func Test_S4_Safety_ValidEmptyVsMalformed(t *testing.T) {
+	tempAuth := t.TempDir()
+	t.Setenv("CLIPROXY_AUTH_DIR", tempAuth)
+
+	// 1. Valid empty models response: {"data": []}
+	serverEmpty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data": []}`))
+	}))
+	defer serverEmpty.Close()
+
+	emptyFile := "deepseek-valid-empty.json"
+	os.WriteFile(filepath.Join(tempAuth, emptyFile), []byte(`{
+		"provider": "deepseek",
+		"api_key": "sk-test",
+		"base_url": "`+serverEmpty.URL+`"
+	}`), 0644)
+
+	reqEmpty, _ := json.Marshal(ManagementRequestPayload{
+		Method: "POST",
+		Path:   "/v0/management/hub/accounts/models",
+		Body:   []byte(`{"id":"` + emptyFile + `"}`),
+	})
+	rawEmpty, _ := handlePluginMethod("management.handle", reqEmpty)
+	var envEmpty envelope
+	json.Unmarshal(rawEmpty, &envEmpty)
+	var respEmpty ManagementResponsePayload
+	json.Unmarshal(envEmpty.Result, &respEmpty)
+
+	if respEmpty.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 on valid empty response, got %d", respEmpty.StatusCode)
+	}
+
+	// 2. Malformed / unknown JSON: {"status": "ok", "unexpected_field": true}
+	serverMalformed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status": "ok", "unexpected_field": true}`))
+	}))
+	defer serverMalformed.Close()
+
+	malformedFile := "deepseek-malformed.json"
+	os.WriteFile(filepath.Join(tempAuth, malformedFile), []byte(`{
+		"provider": "deepseek",
+		"api_key": "sk-test",
+		"base_url": "`+serverMalformed.URL+`"
+	}`), 0644)
+
+	reqMalformed, _ := json.Marshal(ManagementRequestPayload{
+		Method: "POST",
+		Path:   "/v0/management/hub/accounts/models",
+		Body:   []byte(`{"id":"` + malformedFile + `"}`),
+	})
+	rawMalformed, _ := handlePluginMethod("management.handle", reqMalformed)
+	var envMalformed envelope
+	json.Unmarshal(rawMalformed, &envMalformed)
+	var respMalformed ManagementResponsePayload
+	json.Unmarshal(envMalformed.Result, &respMalformed)
+
+	// Malformed response must NOT be accepted as valid models (must fail or error)
+	if respMalformed.StatusCode == http.StatusOK {
+		var res struct {
+			OK bool `json:"ok"`
+		}
+		decoded, _ := base64.StdEncoding.DecodeString(respMalformed.Body)
+		json.Unmarshal(decoded, &res)
+		if res.OK {
+			t.Errorf("expected malformed/unrecognized response to not return ok=true")
+		}
+	}
+}
+
+func Test_Regression_Blocker1_BigNumberPreservation(t *testing.T) {
+	tempAuth := t.TempDir()
+	t.Setenv("CLIPROXY_AUTH_DIR", tempAuth)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data": [{"id": "model-large-num"}]}`))
+	}))
+	defer server.Close()
+
+	accountFile := "deepseek-bignum.json"
+	targetPath := filepath.Join(tempAuth, accountFile)
+
+	// exact big number 9007199254740993 (2^53 + 1)
+	initialContent := []byte(`{
+		"provider": "deepseek",
+		"type": "deepseek",
+		"label": "BigNum Test",
+		"api_key": "sk-bignum-key",
+		"base_url": "` + server.URL + `",
+		"unknown_big_int": 9007199254740993
+	}`)
+	if err := os.WriteFile(targetPath, initialContent, 0644); err != nil {
+		t.Fatalf("failed to write initial file: %v", err)
+	}
+
+	req, _ := json.Marshal(ManagementRequestPayload{
+		Method: "POST",
+		Path:   "/v0/management/hub/accounts/models",
+		Body:   []byte(`{"id":"` + accountFile + `"}`),
+	})
+	raw, err := handlePluginMethod("management.handle", req)
+	if err != nil {
+		t.Fatalf("handlePluginMethod failed: %v", err)
+	}
+	var env envelope
+	json.Unmarshal(raw, &env)
+	var resp ManagementResponsePayload
+	json.Unmarshal(env.Result, &resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+	}
+
+	// Verify that the file on disk still contains 9007199254740993 without float precision loss
+	rawAfter, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("failed to read file after discovery: %v", err)
+	}
+
+	rawStr := string(rawAfter)
+	if !strings.Contains(rawStr, "9007199254740993") {
+		t.Errorf("Blocker 1 regression: big integer 9007199254740993 was corrupted in credential file: %s", rawStr)
+	}
+}
+
+func Test_Regression_Blocker2_ChangedCredentialsWhileInFlight(t *testing.T) {
+	tempAuth := t.TempDir()
+	t.Setenv("CLIPROXY_AUTH_DIR", tempAuth)
+
+	accountFile := "deepseek-changed-creds.json"
+	targetPath := filepath.Join(tempAuth, accountFile)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// While request is in flight, modify the account credentials on disk
+		modifiedContent := []byte(`{
+			"provider": "deepseek",
+			"type": "deepseek",
+			"label": "DeepSeek Changed In Flight",
+			"api_key": "sk-new-key-changed-in-flight-999",
+			"base_url": "` + r.Host + `"
+		}`)
+		os.WriteFile(targetPath, modifiedContent, 0644)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data": [{"id": "model-stale-v1"}]}`))
+	}))
+	defer server.Close()
+
+	initialContent := []byte(`{
+		"provider": "deepseek",
+		"type": "deepseek",
+		"label": "DeepSeek Initial",
+		"api_key": "sk-old-key-v1",
+		"base_url": "` + server.URL + `"
+	}`)
+	os.WriteFile(targetPath, initialContent, 0644)
+
+	req, _ := json.Marshal(ManagementRequestPayload{
+		Method: "POST",
+		Path:   "/v0/management/hub/accounts/models",
+		Body:   []byte(`{"id":"` + accountFile + `"}`),
+	})
+	raw, _ := handlePluginMethod("management.handle", req)
+	var env envelope
+	json.Unmarshal(raw, &env)
+	var resp ManagementResponsePayload
+	json.Unmarshal(env.Result, &resp)
+
+	// Must reject stale result when effective credentials changed
+	if resp.StatusCode == http.StatusOK {
+		var res struct {
+			OK bool `json:"ok"`
+		}
+		decoded, _ := base64.StdEncoding.DecodeString(resp.Body)
+		json.Unmarshal(decoded, &res)
+		if res.OK {
+			t.Errorf("Blocker 2 regression: expected discovery to reject stale result when credentials changed during flight")
+		}
+	}
+
+	// Verify file on disk still has new key and does NOT have stale cache
+	rawAfter, _ := os.ReadFile(targetPath)
+	var accAfter map[string]any
+	json.Unmarshal(rawAfter, &accAfter)
+
+	if accAfter["api_key"] != "sk-new-key-changed-in-flight-999" {
+		t.Errorf("expected updated api_key to be preserved, got %v", accAfter["api_key"])
+	}
+	if cacheObj, ok := accAfter["model_cache"].(map[string]any); ok && cacheObj != nil {
+		modelsList, _ := cacheObj["models"].([]any)
+		if len(modelsList) > 0 && modelsList[0] == "model-stale-v1" {
+			t.Errorf("Blocker 2 regression: stale models were written to cache despite changed credentials")
+		}
+	}
+}
+
+func Test_Regression_Blocker3_DeterministicInterleaving_DeleteDuringFlight(t *testing.T) {
+	tempAuth := t.TempDir()
+	t.Setenv("CLIPROXY_AUTH_DIR", tempAuth)
+
+	accountFile := "groq-del-in-flight.json"
+	targetPath := filepath.Join(tempAuth, accountFile)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// While request is in flight, delete the account via public management API
+		reqDel, _ := json.Marshal(ManagementRequestPayload{
+			Method: "DELETE",
+			Path:   "/v0/management/hub/accounts",
+			Body:   []byte(`{"id":"` + accountFile + `"}`),
+		})
+		rawDel, err := handlePluginMethod("management.handle", reqDel)
+		if err != nil {
+			t.Errorf("delete failed: %v", err)
+		}
+		var envDel envelope
+		json.Unmarshal(rawDel, &envDel)
+		var respDel ManagementResponsePayload
+		json.Unmarshal(envDel.Result, &respDel)
+		if respDel.StatusCode != http.StatusOK {
+			t.Errorf("expected 200 on DELETE, got %d", respDel.StatusCode)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data": [{"id": "model-never-save"}]}`))
+	}))
+	defer server.Close()
+
+	initialContent := []byte(`{
+		"provider": "groq",
+		"type": "openai-compatible",
+		"label": "Groq In Flight Delete",
+		"api_key": "gsk-temp-12345",
+		"base_url": "` + server.URL + `"
+	}`)
+	os.WriteFile(targetPath, initialContent, 0644)
+
+	req, _ := json.Marshal(ManagementRequestPayload{
+		Method: "POST",
+		Path:   "/v0/management/hub/accounts/models",
+		Body:   []byte(`{"id":"` + accountFile + `", "refresh": true}`),
+	})
+	raw, _ := handlePluginMethod("management.handle", req)
+	var env envelope
+	json.Unmarshal(raw, &env)
+	var resp ManagementResponsePayload
+	json.Unmarshal(env.Result, &resp)
+
+	if resp.StatusCode == http.StatusOK {
+		var res struct {
+			OK bool `json:"ok"`
+		}
+		decoded, _ := base64.StdEncoding.DecodeString(resp.Body)
+		json.Unmarshal(decoded, &res)
+		if res.OK {
+			t.Errorf("expected discovery to fail when account deleted during flight")
+		}
+	}
+
+	// Target file must NOT exist (must not be resurrected)
+	if _, err := os.Stat(targetPath); !os.IsNotExist(err) {
+		t.Errorf("Blocker 3 regression: deleted account was resurrected on disk")
+	}
+}

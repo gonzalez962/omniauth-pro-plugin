@@ -379,9 +379,13 @@ func handlePluginMethod(method string, request []byte) ([]byte, error) {
 				{"Method": "GET", "Path": "/hub/accounts"},
 				{"Method": "POST", "Path": "/hub/accounts"},
 				{"Method": "DELETE", "Path": "/hub/accounts"},
+				{"Method": "GET", "Path": "/hub/accounts/models"},
+				{"Method": "POST", "Path": "/hub/accounts/models"},
 				{"Method": "GET", "Path": "/opencode/accounts"},
 				{"Method": "POST", "Path": "/opencode/accounts"},
 				{"Method": "DELETE", "Path": "/opencode/accounts"},
+				{"Method": "GET", "Path": "/opencode/accounts/models"},
+				{"Method": "POST", "Path": "/opencode/accounts/models"},
 			},
 		}
 		raw, err := json.Marshal(regResponse)
@@ -483,6 +487,11 @@ func handleManagementHTTP(request []byte) ([]byte, error) {
 		path = "/accounts"
 	}
 
+	// Models Discovery Endpoint
+	if strings.HasSuffix(path, "/hub/accounts/models") || strings.HasSuffix(path, "/opencode/accounts/models") || strings.HasSuffix(path, "/accounts/models") {
+		return handleAccountModelsAPI(method, req)
+	}
+
 	// API Endpoints
 	if strings.HasSuffix(path, "/hub/accounts") || strings.HasSuffix(path, "/opencode/accounts") || strings.Contains(path, "/accounts/api") || strings.Contains(path, "/api/accounts") {
 		return handleAccountsAPI(method, req)
@@ -501,15 +510,21 @@ func handleManagementHTTP(request []byte) ([]byte, error) {
 	return okEnvelope(raw), nil
 }
 
+type AccountModelCache struct {
+	Models    []string `json:"models"`
+	UpdatedAt string   `json:"updated_at,omitempty"`
+}
+
 type accountItem struct {
-	ID         string `json:"id"`
-	Provider   string `json:"provider"`
-	Label      string `json:"label"`
-	KeyMask    string `json:"key_mask"`
-	Prefix     string `json:"prefix"`
-	CustomLogo string `json:"custom_logo,omitempty"`
-	Disabled   bool   `json:"disabled"`
-	CreatedAt  string `json:"created_at"`
+	ID         string             `json:"id"`
+	Provider   string             `json:"provider"`
+	Label      string             `json:"label"`
+	KeyMask    string             `json:"key_mask"`
+	Prefix     string             `json:"prefix"`
+	CustomLogo string             `json:"custom_logo,omitempty"`
+	Disabled   bool               `json:"disabled"`
+	CreatedAt  string             `json:"created_at"`
+	ModelCache *AccountModelCache `json:"model_cache,omitempty"`
 }
 
 func isHubManagedFile(name string) bool {
@@ -576,6 +591,26 @@ func handleAccountsAPI(method string, req ManagementRequestPayload) ([]byte, err
 						keyMask = fmt.Sprintf("%s...", apiKey[:4])
 					}
 
+					var modelCache *AccountModelCache
+					if mc, ok := item["model_cache"].(map[string]any); ok && mc != nil {
+						var mcModels []string
+						if rawM, ok := mc["models"].([]any); ok {
+							for _, m := range rawM {
+								if s, ok := m.(string); ok && s != "" {
+									mcModels = append(mcModels, s)
+								}
+							}
+						}
+						if mcModels == nil {
+							mcModels = []string{}
+						}
+						upAt, _ := mc["updated_at"].(string)
+						modelCache = &AccountModelCache{
+							Models:    mcModels,
+							UpdatedAt: upAt,
+						}
+					}
+
 					accounts = append(accounts, accountItem{
 						ID:         f.Name(),
 						Provider:   provider,
@@ -585,6 +620,7 @@ func handleAccountsAPI(method string, req ManagementRequestPayload) ([]byte, err
 						CustomLogo: customLogo,
 						Disabled:   disabled,
 						CreatedAt:  createdAt,
+						ModelCache: modelCache,
 					})
 				}
 			}
@@ -822,8 +858,11 @@ func handleAccountsAPI(method string, req ManagementRequestPayload) ([]byte, err
 
 		encoded, _ := json.MarshalIndent(accountData, "", "  ")
 		targetPath := filepath.Join(authDir, accountID)
-		if err := os.WriteFile(targetPath, encoded, 0644); err != nil {
-			resBytes, _ := json.Marshal(map[string]any{"ok": false, "error": "No se pudo guardar la cuenta: " + err.Error()})
+		accountStorageMu.Lock()
+		writeErr := os.WriteFile(targetPath, encoded, 0644)
+		accountStorageMu.Unlock()
+		if writeErr != nil {
+			resBytes, _ := json.Marshal(map[string]any{"ok": false, "error": "No se pudo guardar la cuenta: " + writeErr.Error()})
 			resp := ManagementResponsePayload{
 				StatusCode: http.StatusInternalServerError,
 				Headers:    map[string][]string{"Content-Type": {"application/json"}},
@@ -868,7 +907,9 @@ func handleAccountsAPI(method string, req ManagementRequestPayload) ([]byte, err
 		}
 
 		targetPath := filepath.Join(authDir, id)
+		accountStorageMu.Lock()
 		_ = os.Remove(targetPath)
+		accountStorageMu.Unlock()
 
 		resBytes, _ := json.Marshal(map[string]any{"ok": true, "message": "Cuenta eliminada con éxito"})
 		resp := ManagementResponsePayload{
@@ -884,6 +925,66 @@ func handleAccountsAPI(method string, req ManagementRequestPayload) ([]byte, err
 		StatusCode: http.StatusMethodNotAllowed,
 		Headers:    map[string][]string{"Content-Type": {"application/json"}},
 		Body:       base64.StdEncoding.EncodeToString([]byte(`{"error":"method_not_allowed"}`)),
+	}
+	raw, _ := json.Marshal(resp)
+	return okEnvelope(raw), nil
+}
+
+func handleAccountModelsAPI(method string, req ManagementRequestPayload) ([]byte, error) {
+	if method != http.MethodGet && method != http.MethodPost {
+		resp := ManagementResponsePayload{
+			StatusCode: http.StatusMethodNotAllowed,
+			Headers:    map[string][]string{"Content-Type": {"application/json"}},
+			Body:       base64.StdEncoding.EncodeToString([]byte(`{"error":"method_not_allowed"}`)),
+		}
+		raw, _ := json.Marshal(resp)
+		return okEnvelope(raw), nil
+	}
+
+	var accountID string
+	var refresh bool
+
+	if len(req.Body) > 0 {
+		var input struct {
+			ID      string `json:"id"`
+			Refresh any    `json:"refresh"`
+		}
+		_ = json.Unmarshal(req.Body, &input)
+		accountID = strings.TrimSpace(input.ID)
+		switch v := input.Refresh.(type) {
+		case bool:
+			refresh = v
+		case string:
+			refresh = strings.ToLower(strings.TrimSpace(v)) == "true" || strings.TrimSpace(v) == "1"
+		}
+	}
+	if accountID == "" && req.Query != nil && len(req.Query["id"]) > 0 {
+		accountID = strings.TrimSpace(req.Query["id"][0])
+	}
+	if !refresh && req.Query != nil && len(req.Query["refresh"]) > 0 {
+		val := strings.ToLower(strings.TrimSpace(req.Query["refresh"][0]))
+		refresh = val == "true" || val == "1"
+	}
+
+	result, statusCode, err := discoverAccountModelsWithRefresh(getAuthDir(), accountID, refresh, nil)
+	if err != nil {
+		resBytes, _ := json.Marshal(map[string]any{"ok": false, "error": err.Error()})
+		resp := ManagementResponsePayload{
+			StatusCode: http.StatusInternalServerError,
+			Headers:    map[string][]string{"Content-Type": {"application/json; charset=utf-8"}},
+			Body:       base64.StdEncoding.EncodeToString(resBytes),
+		}
+		raw, _ := json.Marshal(resp)
+		return okEnvelope(raw), nil
+	}
+
+	resBytes, _ := json.Marshal(result)
+	resp := ManagementResponsePayload{
+		StatusCode: statusCode,
+		Headers: map[string][]string{
+			"Content-Type": {"application/json; charset=utf-8"},
+		},
+		Body: base64.StdEncoding.EncodeToString(resBytes),
 	}
 	raw, _ := json.Marshal(resp)
 	return okEnvelope(raw), nil
@@ -1377,6 +1478,186 @@ const accountsHTMLTemplate = `<!DOCTYPE html>
       transform: scale(1.05);
     }
 
+    .btn-models {
+      background: rgba(59, 130, 246, 0.15);
+      border: 1px solid rgba(59, 130, 246, 0.35);
+      color: #60a5fa;
+      padding: 7px 12px;
+      border-radius: 9px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn-models:hover:not(:disabled) {
+      background: rgba(59, 130, 246, 0.35);
+      border-color: #93c5fd;
+      color: #ffffff;
+      box-shadow: 0 0 12px rgba(59, 130, 246, 0.4);
+    }
+    .btn-models:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+    .account-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: flex-end;
+      justify-content: flex-start;
+    }
+    .account-models-box {
+      margin-top: 10px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      background: rgba(15, 23, 42, 0.4);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      font-size: 0.82rem;
+      display: none;
+    }
+    .models-header {
+      font-weight: 600;
+      color: var(--neon-cyan);
+      margin-bottom: 6px;
+      font-size: 0.8rem;
+    }
+    .models-pills-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .model-pill {
+      background: rgba(6, 182, 212, 0.12);
+      border: 1px solid rgba(6, 182, 212, 0.3);
+      color: #a5f3fc;
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-family: monospace;
+    }
+    .models-loading {
+      color: #38bdf8;
+      font-style: italic;
+    }
+    .models-error {
+      color: #f87171;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .btn-retry {
+      background: rgba(239, 68, 68, 0.2);
+      border: 1px solid rgba(239, 68, 68, 0.4);
+      color: #fca5a5;
+      padding: 2px 8px;
+      border-radius: 5px;
+      font-size: 0.75rem;
+      cursor: pointer;
+    }
+    .btn-retry:hover {
+      background: rgba(239, 68, 68, 0.4);
+    }
+
+    /* Model List Modal (S3) */
+    .modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      background: rgba(6, 9, 19, 0.8);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      z-index: 1000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .modal-card {
+      background: rgba(15, 23, 42, 0.95);
+      border: 1px solid var(--glass-border-glow);
+      border-radius: 20px;
+      width: 100%;
+      max-width: 620px;
+      max-height: 85vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+      overflow: hidden;
+      animation: modalFadeIn 0.2s ease-out;
+    }
+    @keyframes modalFadeIn {
+      from { opacity: 0; transform: scale(0.96); }
+      to { opacity: 1; transform: scale(1); }
+    }
+    .modal-header {
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--glass-border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(30, 41, 59, 0.4);
+    }
+    .modal-header h3 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      color: var(--text-main);
+    }
+    .modal-close-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 1.5rem;
+      cursor: pointer;
+      line-height: 1;
+      padding: 4px 8px;
+      border-radius: 8px;
+      transition: all 0.2s;
+    }
+    .modal-close-btn:hover {
+      color: #fff;
+      background: rgba(255, 255, 255, 0.1);
+    }
+    .modal-body {
+      padding: 20px 24px;
+      overflow-y: auto;
+      flex: 1;
+    }
+    .modal-subtitle {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      margin-bottom: 14px;
+    }
+    .modal-footer {
+      padding: 14px 24px;
+      border-top: 1px solid var(--glass-border);
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 12px;
+      background: rgba(15, 23, 42, 0.5);
+    }
+    .btn-close-modal {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid var(--glass-border);
+      color: var(--text-main);
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn-close-modal:hover {
+      background: rgba(255, 255, 255, 0.15);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+
     .btn-refresh {
       background: rgba(255, 255, 255, 0.08);
       border: 1px solid var(--glass-border);
@@ -1578,6 +1859,24 @@ const accountsHTMLTemplate = `<!DOCTYPE html>
           <div class="skeleton-card"></div>
           <div class="skeleton-card"></div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Model List Modal (S3) -->
+  <div id="modelsModal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeModelsModal()">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="modelsModalTitle">Modelos de la cuenta</h3>
+        <button class="modal-close-btn" onclick="closeModelsModal()" title="Cerrar">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="modelsModalSubtitle" class="modal-subtitle"></div>
+        <div id="modelsModalContent"></div>
+      </div>
+      <div class="modal-footer">
+        <button id="modelsModalRefreshBtn" class="btn-models" onclick="refreshModalModels()">🔄 Actualizar desde proveedor</button>
+        <button class="btn-close-modal" onclick="closeModelsModal()">Cerrar</button>
       </div>
     </div>
   </div>
@@ -1868,7 +2167,7 @@ const accountsHTMLTemplate = `<!DOCTYPE html>
       }
 
       listDiv.innerHTML = list.map(acc => ` + "`" + `
-        <div class="account-card-3d">
+        <div class="account-card-3d" id="card-${acc.id}">
           <div class="account-main">
             ${getProviderLogo(acc.provider, acc.custom_logo)}
             <div class="account-info">
@@ -1881,7 +2180,8 @@ const accountsHTMLTemplate = `<!DOCTYPE html>
               <div class="models-hint">${getModelsHint(acc.provider)}</div>
             </div>
           </div>
-          <div>
+          <div class="account-actions">
+            <button class="btn-models" id="btn-models-${acc.id}" onclick="openModelsModal('${acc.id}')">🔄 Obtener modelos</button>
             <button class="btn-delete" onclick="deleteAccount('${acc.id}')">🗑️ Quitar</button>
           </div>
         </div>
@@ -1996,7 +2296,10 @@ const accountsHTMLTemplate = `<!DOCTYPE html>
           setLogoTab('default');
           onProviderChange();
           apiFetch("/v0/management/auth-files/refresh?all=true", { method: "POST", body: JSON.stringify({ all: true }) }).catch(() => {});
-          loadAccounts();
+          await loadAccounts();
+          if (data.id) {
+            openModelsModal(data.id);
+          }
         } else {
           showAlert(data.error || "No se pudo conectar la cuenta", "error");
         }
@@ -2004,6 +2307,150 @@ const accountsHTMLTemplate = `<!DOCTYPE html>
         showAlert(e.message, "error");
       }
     });
+
+    function escapeHtml(str) {
+      if (!str) return "";
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    let activeModalAccountId = null;
+
+    function openModelsModal(id) {
+      activeModalAccountId = id;
+      const modal = document.getElementById("modelsModal");
+      const title = document.getElementById("modelsModalTitle");
+      const sub = document.getElementById("modelsModalSubtitle");
+      const content = document.getElementById("modelsModalContent");
+
+      const acc = allAccounts.find(a => a.id === id);
+      const accLabel = acc ? (acc.label || acc.provider || id) : id;
+      if (title) title.textContent = "Modelos: " + accLabel;
+      if (sub) sub.textContent = "Archivo: " + id;
+      if (modal) modal.style.display = "flex";
+
+      if (acc && acc.model_cache && Array.isArray(acc.model_cache.models) && acc.model_cache.models.length > 0) {
+        renderModalModels(id, acc.model_cache.models, true, acc.model_cache.updated_at);
+      } else if (content) {
+        content.innerHTML = '<div class="models-loading">⏳ Obteniendo modelos...</div>';
+      }
+
+      return fetchModelsForAccount(id, false);
+    }
+    window.openModelsModal = openModelsModal;
+
+    function closeModelsModal() {
+      activeModalAccountId = null;
+      const modal = document.getElementById("modelsModal");
+      if (modal) modal.style.display = "none";
+    }
+    window.closeModelsModal = closeModelsModal;
+
+    async function refreshModalModels() {
+      if (!activeModalAccountId) return;
+      return fetchModelsForAccount(activeModalAccountId, true);
+    }
+    window.refreshModalModels = refreshModalModels;
+
+    function renderModalModels(id, models, isCached, updatedAt) {
+      const content = document.getElementById("modelsModalContent");
+      if (!content || activeModalAccountId !== id) return;
+
+      if (!models || models.length === 0) {
+        content.innerHTML = '<div class="models-loading">No se encontraron modelos disponibles.</div>';
+        return;
+      }
+
+      const pills = models.map(m => '<span class="model-pill">' + escapeHtml(m) + '</span>').join("");
+      const statusBadge = isCached
+        ? '<span style="font-size:0.75rem; color:var(--neon-green); margin-left:8px;">(En caché)</span>'
+        : '<span style="font-size:0.75rem; color:var(--neon-cyan); margin-left:8px;">(Actualizado)</span>';
+      content.innerHTML = '<div class="models-header">Modelos disponibles (' + models.length + '):' + statusBadge + '</div><div class="models-pills-list">' + pills + '</div>';
+    }
+
+    async function fetchModelsForAccount(id, refresh) {
+      if (typeof refresh !== "boolean") refresh = false;
+
+      // Ensure modal is open and active for this account
+      if (activeModalAccountId !== id) {
+        activeModalAccountId = id;
+        const modal = document.getElementById("modelsModal");
+        const title = document.getElementById("modelsModalTitle");
+        const sub = document.getElementById("modelsModalSubtitle");
+        const acc = allAccounts.find(a => a.id === id);
+        const accLabel = acc ? (acc.label || acc.provider || id) : id;
+        if (title) title.textContent = "Modelos: " + accLabel;
+        if (sub) sub.textContent = "Archivo: " + id;
+        if (modal) modal.style.display = "flex";
+      }
+
+      const content = document.getElementById("modelsModalContent");
+      const refreshBtn = document.getElementById("modelsModalRefreshBtn");
+      const cardBtn = document.getElementById("btn-models-" + id);
+
+      if (refreshBtn && activeModalAccountId === id) {
+        refreshBtn.disabled = true;
+        refreshBtn.textContent = "⏳ Obteniendo...";
+      }
+      if (cardBtn) {
+        cardBtn.disabled = true;
+        cardBtn.textContent = "⏳ Obteniendo...";
+      }
+      if (content && activeModalAccountId === id && (!content.innerHTML || content.innerHTML.includes("models-loading") || refresh)) {
+        content.innerHTML = '<div class="models-loading">⏳ ' + (refresh ? 'Actualizando modelos del proveedor...' : 'Obteniendo modelos...') + '</div>';
+      }
+
+      try {
+        const qUrl = apiUrl + "/models?id=" + encodeURIComponent(id) + (refresh ? "&refresh=true" : "");
+        const res = await apiFetch(qUrl, { method: "GET" });
+        const data = await res.json().catch(() => null);
+
+        const isCurrentModal = (activeModalAccountId === id);
+
+        if (!res.ok || !data || !data.ok) {
+          const errDetail = data && data.error ? data.error : ("HTTP " + res.status);
+          if (isCurrentModal && content) {
+            content.innerHTML = '<div class="models-error">⚠️ ' + escapeHtml(errDetail) + ' <button class="btn-retry" onclick="fetchModelsForAccount(\'' + escapeHtml(id) + '\', true)">Reintentar</button></div>';
+          }
+          return;
+        }
+
+        const models = data.models || [];
+        if (isCurrentModal) {
+          renderModalModels(id, models, !!data.cached, data.updated_at);
+        }
+
+        // Update in-memory account cache
+        const acc = allAccounts.find(a => a.id === id);
+        if (acc) {
+          acc.model_cache = {
+            models: models,
+            updated_at: data.updated_at
+          };
+        }
+      } catch (err) {
+        const isCurrentModal = (activeModalAccountId === id);
+        if (isCurrentModal && content) {
+          content.innerHTML = '<div class="models-error">⚠️ ' + escapeHtml(err.message) + ' <button class="btn-retry" onclick="fetchModelsForAccount(\'' + escapeHtml(id) + '\', true)">Reintentar</button></div>';
+        }
+      } finally {
+        // ALWAYS restore originating card button state (Blocker 4)
+        const finalCardBtn = document.getElementById("btn-models-" + id);
+        if (finalCardBtn) {
+          finalCardBtn.disabled = false;
+          finalCardBtn.textContent = "🔄 Obtener modelos";
+        }
+        if (activeModalAccountId === id && refreshBtn) {
+          refreshBtn.disabled = false;
+          refreshBtn.textContent = "🔄 Actualizar desde proveedor";
+        }
+      }
+    }
+    window.fetchModelsForAccount = fetchModelsForAccount;
 
     function showAlert(msg, type) {
       const el = document.getElementById("alertBox");
