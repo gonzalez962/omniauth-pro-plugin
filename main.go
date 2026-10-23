@@ -502,16 +502,20 @@ func handleManagementHTTP(request []byte) ([]byte, error) {
 }
 
 type accountItem struct {
-	ID        string `json:"id"`
-	Provider  string `json:"provider"`
-	Label     string `json:"label"`
-	KeyMask   string `json:"key_mask"`
-	Prefix    string `json:"prefix"`
-	Disabled  bool   `json:"disabled"`
-	CreatedAt string `json:"created_at"`
+	ID         string `json:"id"`
+	Provider   string `json:"provider"`
+	Label      string `json:"label"`
+	KeyMask    string `json:"key_mask"`
+	Prefix     string `json:"prefix"`
+	CustomLogo string `json:"custom_logo,omitempty"`
+	Disabled   bool   `json:"disabled"`
+	CreatedAt  string `json:"created_at"`
 }
 
 func isHubManagedFile(name string) bool {
+	if filepath.Base(name) != name || strings.ContainsAny(name, "/\\") {
+		return false
+	}
 	if !strings.HasSuffix(name, ".json") {
 		return false
 	}
@@ -523,6 +527,7 @@ func isHubManagedFile(name string) bool {
 		"mistral-",
 		"gemini-",
 		"google-",
+		"deepseek-",
 		"nan-",
 		"openai-compat-",
 	}
@@ -561,6 +566,7 @@ func handleAccountsAPI(method string, req ManagementRequestPayload) ([]byte, err
 					}
 					disabled, _ := item["disabled"].(bool)
 					prefix, _ := item["prefix"].(string)
+					customLogo, _ := item["custom_logo"].(string)
 					createdAt, _ := item["created_at"].(string)
 
 					keyMask := "***"
@@ -571,13 +577,14 @@ func handleAccountsAPI(method string, req ManagementRequestPayload) ([]byte, err
 					}
 
 					accounts = append(accounts, accountItem{
-						ID:        f.Name(),
-						Provider:  provider,
-						Label:     label,
-						KeyMask:   keyMask,
-						Prefix:    prefix,
-						Disabled:  disabled,
-						CreatedAt: createdAt,
+						ID:         f.Name(),
+						Provider:   provider,
+						Label:      label,
+						KeyMask:    keyMask,
+						Prefix:     prefix,
+						CustomLogo: customLogo,
+						Disabled:   disabled,
+						CreatedAt:  createdAt,
 					})
 				}
 			}
@@ -600,11 +607,12 @@ func handleAccountsAPI(method string, req ManagementRequestPayload) ([]byte, err
 	case http.MethodPost:
 		// Add new account
 		var input struct {
-			Provider string `json:"provider"`
-			Label    string `json:"label"`
-			APIKey   string `json:"api_key"`
-			BaseURL  string `json:"base_url"`
-			Prefix   string `json:"prefix"`
+			Provider   string `json:"provider"`
+			Label      string `json:"label"`
+			APIKey     string `json:"api_key"`
+			BaseURL    string `json:"base_url"`
+			Prefix     string `json:"prefix"`
+			CustomLogo string `json:"custom_logo"`
 		}
 		if len(req.Body) > 0 {
 			_ = json.Unmarshal(req.Body, &input)
@@ -630,6 +638,7 @@ func handleAccountsAPI(method string, req ManagementRequestPayload) ([]byte, err
 		label := strings.TrimSpace(input.Label)
 		prefix := strings.TrimSpace(input.Prefix)
 		baseURL := strings.TrimSpace(input.BaseURL)
+		customLogo := strings.TrimSpace(input.CustomLogo)
 
 		var filePrefix string
 		accountData := map[string]any{
@@ -637,6 +646,9 @@ func handleAccountsAPI(method string, req ManagementRequestPayload) ([]byte, err
 			"access_token": key,
 			"disabled":     false,
 			"created_at":   time.Now().UTC().Format(time.RFC3339),
+		}
+		if customLogo != "" {
+			accountData["custom_logo"] = customLogo
 		}
 
 		switch provider {
@@ -721,6 +733,23 @@ func handleAccountsAPI(method string, req ManagementRequestPayload) ([]byte, err
 			}
 			accountData["type"] = "openai-compatible"
 			accountData["provider"] = "gemini"
+			accountData["label"] = label
+			accountData["prefix"] = prefix
+			accountData["base_url"] = baseURL
+
+		case "deepseek":
+			filePrefix = "deepseek"
+			if label == "" {
+				label = "DeepSeek Official"
+			}
+			if prefix == "" {
+				prefix = "deepseek"
+			}
+			if baseURL == "" {
+				baseURL = "https://api.deepseek.com"
+			}
+			accountData["type"] = "openai-compatible"
+			accountData["provider"] = "deepseek"
 			accountData["label"] = label
 			accountData["prefix"] = prefix
 			accountData["base_url"] = baseURL
@@ -857,135 +886,677 @@ func getAccountsHTML() string {
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <title>OmniAuth Pro - CPAMC</title>
+  <title>OmniAuth Pro - CPAMC Quantum</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
     :root {
-      --bg: #0f172a;
-      --card-bg: #1e293b;
-      --text: #f8fafc;
-      --muted: #94a3b8;
-      --primary: #3b82f6;
-      --primary-hover: #2563eb;
-      --danger: #ef4444;
-      --danger-hover: #dc2626;
-      --success: #10b981;
-      --border: #334155;
-      --gemini: #4285f4;
-      --nvidia: #76b900;
-      --groq: #f97316;
-      --cerebras: #8b5cf6;
-      --mistral: #f59e0b;
-      --nan: #7D39EB;
+      --bg-base: #060913;
+      --bg-gradient: radial-gradient(circle at 15% 15%, rgba(59, 130, 246, 0.18) 0%, transparent 45%),
+                         radial-gradient(circle at 85% 85%, rgba(139, 92, 246, 0.20) 0%, transparent 50%),
+                         radial-gradient(circle at 50% 50%, rgba(14, 165, 233, 0.08) 0%, transparent 60%),
+                         #060913;
+      --glass-panel: rgba(15, 23, 42, 0.65);
+      --glass-panel-hover: rgba(30, 41, 59, 0.85);
+      --glass-border: rgba(255, 255, 255, 0.08);
+      --glass-border-glow: rgba(99, 102, 241, 0.45);
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+      --neon-cyan: #06b6d4;
+      --neon-blue: #3b82f6;
+      --neon-purple: #8b5cf6;
+      --neon-pink: #ec4899;
+      --neon-green: #10b981;
+      --neon-amber: #f59e0b;
+      --neon-red: #f43f5e;
+      --font-stack: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", sans-serif;
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-    body { background-color: var(--bg); color: var(--text); padding: 24px; }
-    .header { margin-bottom: 24px; border-bottom: 1px solid var(--border); padding-bottom: 16px; }
-    .header h1 { font-size: 1.5rem; font-weight: 700; display: flex; align-items: center; gap: 8px; }
-    .header p { color: var(--muted); font-size: 0.875rem; margin-top: 4px; }
-    .grid { display: grid; grid-template-columns: 1fr 2fr; gap: 24px; }
-    @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
-    .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
-    .card h2 { font-size: 1.1rem; margin-bottom: 16px; font-weight: 600; display: flex; align-items: center; justify-content: space-between; }
-    .form-group { margin-bottom: 14px; }
-    .form-group label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 6px; }
-    .form-group input, .form-group select { width: 100%; background: #0b1120; border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; color: #fff; font-size: 0.9rem; }
-    .form-group input:focus, .form-group select:focus { outline: none; border-color: var(--primary); }
-    .btn { background: var(--primary); color: #fff; border: none; border-radius: 6px; padding: 10px 16px; font-weight: 500; font-size: 0.9rem; cursor: pointer; transition: 0.2s; width: 100%; }
-    .btn:hover { background: var(--primary-hover); }
-    .btn-danger { background: var(--danger); width: auto; padding: 6px 12px; font-size: 0.8rem; }
-    .btn-danger:hover { background: var(--danger-hover); }
-    .account-card { background: #0b1120; border: 1px solid var(--border); border-radius: 6px; padding: 14px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; gap: 14px; }
-    .account-logo { width: 44px; height: 44px; border-radius: 8px; object-fit: contain; background: #1e293b; border: 1px solid var(--border); padding: 2px; flex-shrink: 0; }
-    .account-logo-placeholder { width: 44px; height: 44px; border-radius: 8px; background: #1e293b; border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 1.3rem; flex-shrink: 0; }
-    .account-main { display: flex; align-items: center; gap: 12px; flex: 1; }
-    .provider-preview { display: flex; align-items: center; gap: 12px; padding: 10px; background: #0b1120; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 14px; }
-    .provider-preview img { width: 40px; height: 40px; border-radius: 6px; object-fit: contain; }
-    .provider-preview-title { font-size: 0.9rem; font-weight: 600; }
-    .provider-preview-desc { font-size: 0.75rem; color: var(--muted); }
-    .account-info h3 { font-size: 0.95rem; font-weight: 600; display: flex; align-items: center; gap: 6px; }
-    .account-info p { font-size: 0.8rem; color: var(--muted); font-family: monospace; margin-top: 4px; }
-    .badge { font-size: 0.75rem; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
-    .badge-opencode { background: rgba(16, 185, 129, 0.2); color: var(--success); }
-    .badge-gemini { background: rgba(66, 133, 244, 0.2); color: #60a5fa; border: 1px solid rgba(66, 133, 244, 0.4); }
-    .badge-nvidia { background: rgba(118, 185, 0, 0.2); color: var(--nvidia); }
-    .badge-groq { background: rgba(249, 115, 22, 0.2); color: var(--groq); }
-    .badge-cerebras { background: rgba(139, 92, 246, 0.2); color: var(--cerebras); }
-    .badge-mistral { background: rgba(245, 158, 11, 0.2); color: var(--mistral); }
-    .badge-nan { background: rgba(125, 57, 235, 0.25); color: #c084fc; border: 1px solid rgba(125, 57, 235, 0.4); }
-    .badge-custom { background: rgba(59, 130, 246, 0.2); color: var(--primary); }
-    .models-hint { font-size: 0.75rem; color: var(--muted); margin-top: 6px; }
-    .alert { padding: 10px; border-radius: 6px; font-size: 0.85rem; margin-bottom: 14px; display: none; }
-    .alert-success { background: rgba(16, 185, 129, 0.2); color: var(--success); border: 1px solid var(--success); }
-    .alert-error { background: rgba(239, 68, 68, 0.2); color: var(--danger); border: 1px solid var(--danger); }
-    .filter-pills { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
-    .filter-btn { background: #0b1120; border: 1px solid var(--border); color: var(--muted); font-size: 0.75rem; padding: 4px 10px; border-radius: 9999px; cursor: pointer; }
-    .filter-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: var(--font-stack); }
+
+    body {
+      background: var(--bg-gradient);
+      background-attachment: fixed;
+      color: var(--text-main);
+      min-height: 100vh;
+      padding: 28px 24px 60px 24px;
+      overflow-x: hidden;
+    }
+
+    /* Ambient glow elements */
+    .ambient-glow {
+      position: fixed;
+      width: 450px;
+      height: 450px;
+      border-radius: 50%;
+      filter: blur(120px);
+      pointer-events: none;
+      z-index: 0;
+      opacity: 0.35;
+      animation: floatGlow 14s ease-in-out infinite alternate;
+    }
+    .glow-1 { top: -100px; left: -100px; background: linear-gradient(135deg, #3b82f6, #06b6d4); }
+    .glow-2 { bottom: -100px; right: -100px; background: linear-gradient(135deg, #8b5cf6, #ec4899); }
+
+    @keyframes floatGlow {
+      0% { transform: translate(0, 0) scale(1); }
+      100% { transform: translate(60px, 40px) scale(1.15); }
+    }
+
+    .container {
+      position: relative;
+      z-index: 1;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    /* Header 2027 */
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 28px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--glass-border);
+      position: relative;
+    }
+    .header-info h1 {
+      font-size: 1.85rem;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      background: linear-gradient(135deg, #ffffff 30%, #93c5fd 70%, #c084fc 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .header-info p {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      margin-top: 6px;
+      max-width: 750px;
+      line-height: 1.45;
+    }
+    .auth-status-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(16, 185, 129, 0.12);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      padding: 6px 14px;
+      border-radius: 9999px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #34d399;
+      box-shadow: 0 0 15px rgba(16, 185, 129, 0.2);
+    }
+    .auth-status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #10b981;
+      box-shadow: 0 0 8px #10b981;
+      animation: pulseDot 2s infinite;
+    }
+    @keyframes pulseDot {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.85); }
+    }
+
+    /* Grid Layout */
+    .grid {
+      display: grid;
+      grid-template-columns: 420px 1fr;
+      gap: 28px;
+      align-items: start;
+    }
+    @media (max-width: 1024px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+
+    /* Glassmorphism 3D Card */
+    .card-3d {
+      background: var(--glass-panel);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--glass-border);
+      border-radius: 20px;
+      padding: 26px;
+      box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.6), inset 0 1px 1px rgba(255, 255, 255, 0.1);
+      transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+      position: relative;
+      overflow: hidden;
+    }
+    .card-3d::before {
+      content: "";
+      position: absolute;
+      top: 0; left: 0; right: 0; height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.25), transparent);
+    }
+
+    .card-title {
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    /* Form Fields 2027 */
+    .form-group {
+      margin-bottom: 18px;
+    }
+    .form-group label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #94a3b8;
+      margin-bottom: 8px;
+    }
+    .input-wrapper {
+      position: relative;
+    }
+    .form-control {
+      width: 100%;
+      background: rgba(11, 17, 32, 0.75);
+      border: 1px solid var(--glass-border);
+      border-radius: 12px;
+      padding: 12px 14px;
+      color: #fff;
+      font-size: 0.92rem;
+      transition: all 0.25s ease;
+      outline: none;
+    }
+    .form-control:focus {
+      border-color: var(--neon-cyan);
+      background: rgba(15, 23, 42, 0.95);
+      box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.2), 0 0 20px rgba(6, 182, 212, 0.2);
+    }
+
+    /* Interactive 3D Provider Preview */
+    .provider-preview-card {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 14px 16px;
+      background: linear-gradient(135deg, rgba(30, 41, 59, 0.6), rgba(15, 23, 42, 0.8));
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 14px;
+      margin-bottom: 20px;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.3);
+      position: relative;
+    }
+    .preview-logo-box {
+      width: 52px;
+      height: 52px;
+      border-radius: 12px;
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid var(--glass-border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 6px;
+      flex-shrink: 0;
+      box-shadow: 0 0 15px rgba(59, 130, 246, 0.25);
+    }
+    .preview-logo-box img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    .preview-title {
+      font-weight: 700;
+      font-size: 1rem;
+      color: #fff;
+    }
+    .preview-desc {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      margin-top: 3px;
+      line-height: 1.35;
+    }
+
+    /* Custom Logo Upload Section */
+    .logo-source-tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .logo-tab-btn {
+      flex: 1;
+      padding: 6px 10px;
+      border-radius: 8px;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--glass-border);
+      color: var(--text-muted);
+      font-size: 0.78rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .logo-tab-btn.active {
+      background: rgba(59, 130, 246, 0.25);
+      border-color: var(--neon-blue);
+      color: #93c5fd;
+    }
+    .logo-upload-zone {
+      border: 2px dashed rgba(255, 255, 255, 0.15);
+      border-radius: 12px;
+      padding: 14px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.25s;
+      background: rgba(15, 23, 42, 0.4);
+    }
+    .logo-upload-zone:hover {
+      border-color: var(--neon-cyan);
+      background: rgba(6, 182, 212, 0.08);
+    }
+    .logo-upload-zone p {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+
+    /* 3D Button */
+    .btn-3d {
+      width: 100%;
+      background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 50%, #06b6d4 100%);
+      background-size: 200% auto;
+      color: #fff;
+      border: none;
+      border-radius: 14px;
+      padding: 14px 20px;
+      font-size: 0.95rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      cursor: pointer;
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      box-shadow: 0 10px 25px -5px rgba(59, 130, 246, 0.5), inset 0 1px 1px rgba(255,255,255,0.3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+    }
+    .btn-3d:hover {
+      background-position: right center;
+      transform: translateY(-2px) scale(1.01);
+      box-shadow: 0 16px 32px -5px rgba(139, 92, 246, 0.6), inset 0 1px 1px rgba(255,255,255,0.4);
+    }
+    .btn-3d:active {
+      transform: translateY(1px);
+    }
+
+    /* Filter Pills 2027 */
+    .filter-pills-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 22px;
+    }
+    .filter-pill {
+      background: rgba(15, 23, 42, 0.7);
+      border: 1px solid var(--glass-border);
+      color: var(--text-muted);
+      padding: 6px 14px;
+      border-radius: 9999px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      backdrop-filter: blur(10px);
+    }
+    .filter-pill:hover {
+      color: #fff;
+      border-color: rgba(255, 255, 255, 0.25);
+      transform: translateY(-1px);
+    }
+    .filter-pill.active {
+      background: linear-gradient(135deg, rgba(59, 130, 246, 0.3), rgba(139, 92, 246, 0.3));
+      border-color: var(--neon-cyan);
+      color: #fff;
+      box-shadow: 0 0 15px rgba(6, 182, 212, 0.35);
+    }
+
+    /* Account List Items 3D Tilt */
+    .accounts-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .account-card-3d {
+      background: linear-gradient(135deg, rgba(30, 41, 59, 0.5) 0%, rgba(15, 23, 42, 0.7) 100%);
+      border: 1px solid var(--glass-border);
+      border-radius: 16px;
+      padding: 16px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      position: relative;
+      overflow: hidden;
+    }
+    .account-card-3d:hover {
+      border-color: var(--glass-border-glow);
+      transform: translateY(-3px) scale(1.008);
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5), 0 0 20px rgba(99, 102, 241, 0.25);
+    }
+    .account-card-3d::after {
+      content: "";
+      position: absolute;
+      top: -50%; left: -50%; width: 200%; height: 200%;
+      background: radial-gradient(circle, rgba(255,255,255,0.06) 0%, transparent 60%);
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .account-card-3d:hover::after {
+      opacity: 1;
+    }
+
+    .account-main {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex: 1;
+    }
+    .account-logo-frame {
+      width: 52px;
+      height: 52px;
+      border-radius: 14px;
+      background: rgba(11, 17, 32, 0.9);
+      border: 1px solid var(--glass-border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 6px;
+      flex-shrink: 0;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    }
+    .account-logo-frame img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      border-radius: 8px;
+    }
+    .account-info h3 {
+      font-size: 1.05rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: #fff;
+    }
+    .account-meta {
+      display: flex;
+      gap: 14px;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      margin-top: 5px;
+    }
+    .meta-tag {
+      background: rgba(255, 255, 255, 0.05);
+      padding: 2px 8px;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    .models-hint {
+      font-size: 0.78rem;
+      color: #a5b4fc;
+      margin-top: 6px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    /* Cyberpunk / Glass Badges */
+    .badge {
+      font-size: 0.72rem;
+      padding: 3px 10px;
+      border-radius: 8px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      box-shadow: 0 0 12px currentColor;
+    }
+    .badge-deepseek { background: rgba(77, 107, 254, 0.2); color: #708aff; border: 1px solid rgba(77, 107, 254, 0.5); }
+    .badge-gemini { background: rgba(66, 133, 244, 0.2); color: #60a5fa; border: 1px solid rgba(66, 133, 244, 0.5); }
+    .badge-opencode { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.5); }
+    .badge-nvidia { background: rgba(118, 185, 0, 0.2); color: #84cc16; border: 1px solid rgba(118, 185, 0, 0.5); }
+    .badge-groq { background: rgba(249, 115, 22, 0.2); color: #fb923c; border: 1px solid rgba(249, 115, 22, 0.5); }
+    .badge-cerebras { background: rgba(139, 92, 246, 0.2); color: #a78bfa; border: 1px solid rgba(139, 92, 246, 0.5); }
+    .badge-mistral { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.5); }
+    .badge-nan { background: rgba(125, 57, 235, 0.25); color: #c084fc; border: 1px solid rgba(125, 57, 235, 0.5); }
+    .badge-custom { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.5); }
+
+    /* Action Buttons */
+    .btn-delete {
+      background: rgba(239, 68, 68, 0.15);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      color: #f87171;
+      padding: 8px 14px;
+      border-radius: 10px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn-delete:hover {
+      background: var(--neon-red);
+      color: #fff;
+      box-shadow: 0 0 15px rgba(244, 63, 94, 0.5);
+      transform: scale(1.05);
+    }
+
+    .btn-refresh {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid var(--glass-border);
+      color: #fff;
+      padding: 6px 14px;
+      border-radius: 10px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn-refresh:hover {
+      background: rgba(255, 255, 255, 0.16);
+      border-color: rgba(255, 255, 255, 0.3);
+    }
+
+    /* Alerts */
+    .alert-box {
+      padding: 12px 16px;
+      border-radius: 12px;
+      font-size: 0.88rem;
+      font-weight: 500;
+      margin-bottom: 18px;
+      display: none;
+      animation: fadeIn 0.3s ease;
+    }
+    .alert-box.success {
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.4);
+      box-shadow: 0 0 20px rgba(16, 185, 129, 0.2);
+    }
+    .alert-box.error {
+      background: rgba(244, 63, 94, 0.15);
+      color: #fb7185;
+      border: 1px solid rgba(244, 63, 94, 0.4);
+      box-shadow: 0 0 20px rgba(244, 63, 94, 0.2);
+    }
+
+    /* Custom Key Input in Modal or Fallback Banner */
+    .auth-helper-banner {
+      background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(234, 88, 12, 0.08));
+      border: 1px solid rgba(245, 158, 11, 0.35);
+      border-radius: 14px;
+      padding: 18px;
+      margin-bottom: 20px;
+      box-shadow: 0 10px 25px rgba(245, 158, 11, 0.1);
+    }
+    .auth-helper-banner strong { color: #fcd34d; font-size: 0.95rem; }
+    .auth-helper-banner p { color: #cbd5e1; font-size: 0.85rem; margin-top: 6px; line-height: 1.45; }
+    .auth-helper-input-row {
+      display: flex;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    /* Skeleton Loading 2027 */
+    .skeleton-card {
+      height: 80px;
+      border-radius: 16px;
+      background: linear-gradient(90deg, rgba(30, 41, 59, 0.3) 25%, rgba(51, 65, 85, 0.5) 50%, rgba(30, 41, 59, 0.3) 75%);
+      background-size: 200% 100%;
+      animation: skeletonShimmer 1.5s infinite;
+      border: 1px solid var(--glass-border);
+    }
+    @keyframes skeletonShimmer {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
   </style>
 </head>
 <body>
-  <div class="header">
-    <h1>🌐 OmniAuth Pro</h1>
-    <p>Hub centralizado de múltiples cuentas y credenciales para OpenCode Go, NVIDIA NIM, NaN Builders, Groq, Cerebras y proveedores OpenAI-compatibles en CPAMC.</p>
-  </div>
+  <div class="ambient-glow glow-1"></div>
+  <div class="ambient-glow glow-2"></div>
 
-  <div class="grid">
-    <div class="card">
-      <h2>➕ Conectar Nueva Cuenta</h2>
-      <div id="alert" class="alert"></div>
-      <form id="addForm">
-        <div class="form-group">
-          <label>Proveedor</label>
-          <select id="provider" onchange="onProviderChange()">
-            <option value="gemini">🔷 Google (Gemini 4 Argon)</option>
-            <option value="opencode-go">🌐 OpenCode Go (Zen API)</option>
-            <option value="nvidia">🟢 NVIDIA NIM (1,000 créditos / nvapi-...)</option>
-            <option value="nan">🟣 NaN Builders (Inferencia UE / Cluster abierto)</option>
-            <option value="groq">⚡ Groq Cloud (LPU ultra rápido)</option>
-            <option value="cerebras">🧠 Cerebras AI (Inferencia ultra rápida)</option>
-            <option value="mistral">🌪️ Mistral AI</option>
-            <option value="openai-compat">⚙️ Personalizado (OpenAI-compatible)</option>
-          </select>
-        </div>
-        <div id="providerPreview" class="provider-preview">
-          <!-- Dinámico -->
-        </div>
-        <div class="form-group">
-          <label>Nombre / Etiqueta de la Cuenta</label>
-          <input type="text" id="label" placeholder="Ej: Cuenta 1 - Wilox" required />
-        </div>
-        <div class="form-group">
-          <label id="apiKeyLabel">API Key de OpenCode (oc_sk_...)</label>
-          <input type="password" id="apiKey" placeholder="oc_sk_..." required />
-        </div>
-        <div class="form-group" id="prefixGroup" style="display:none;">
-          <label>Prefijo para Modelos (Opcional)</label>
-          <input type="text" id="prefix" placeholder="ej: myprov" />
-        </div>
-        <div class="form-group" id="baseUrlGroup" style="display:none;">
-          <label>Base URL Personalizada (Opcional)</label>
-          <input type="text" id="baseUrl" placeholder="https://api.ejemplo.com/v1" />
-        </div>
-        <button type="submit" class="btn">Conectar y Crear Tarjeta en CPAMC</button>
-      </form>
+  <div class="container">
+    <div class="header">
+      <div class="header-info">
+        <h1>🌐 OmniAuth Pro <span style="font-size:0.8rem; font-weight:600; padding:3px 10px; border-radius:9999px; background:linear-gradient(135deg, rgba(6,182,212,0.2), rgba(139,92,246,0.2)); border:1px solid rgba(6,182,212,0.4); color:#67e8f9;">v2.0 Quantum 2027</span></h1>
+        <p>Hub multi-cuenta de alto rendimiento. Gestiona de forma unificada credenciales, logos personalizados, balanceo y aislamiento para DeepSeek, Google Gemini 4 Argon, NVIDIA NIM y clústeres compatibles.</p>
+      </div>
+      <div id="authStatusIndicator" class="auth-status-badge">
+        <div class="auth-status-dot"></div>
+        <span id="authStatusText">Conectando con CPAMC...</span>
+      </div>
     </div>
 
-    <div class="card">
-      <h2>
-        <span>📋 Cuentas Conectadas en CPAMC</span>
-        <button class="filter-btn" onclick="loadAccounts()" style="font-size:0.8rem;">🔄 Refrescar</button>
-      </h2>
-      <div class="filter-pills" id="filters">
-        <button class="filter-btn active" onclick="setFilter('all')">Todos</button>
-        <button class="filter-btn" onclick="setFilter('opencode-go')">OpenCode</button>
-        <button class="filter-btn" onclick="setFilter('gemini')">Google (Gemini 4 Argon)</button>
-        <button class="filter-btn" onclick="setFilter('nvidia')">NVIDIA NIM</button>
-        <button class="filter-btn" onclick="setFilter('nan')">NaN Builders</button>
-        <button class="filter-btn" onclick="setFilter('groq')">Groq</button>
-        <button class="filter-btn" onclick="setFilter('cerebras')">Cerebras</button>
-        <button class="filter-btn" onclick="setFilter('otros')">Otros</button>
+    <!-- Fallback de sesión en caso de no estar en localStorage -->
+    <div id="sessionBanner" class="auth-helper-banner" style="display:none;">
+      <strong>🔑 Autenticación con CPAMC Management API</strong>
+      <p>No se detectó el token en la sesión actual (ocurre si no activaste <em>"Remember password"</em> al iniciar sesión en el panel principal). Pega tu clave de administración para desbloquear la sincronización en vivo:</p>
+      <div class="auth-helper-input-row">
+        <input type="password" id="manualSecretKey" class="form-control" style="max-width:380px;" placeholder="Management Secret Key o Token..." />
+        <button type="button" class="btn-refresh" onclick="saveManualKey()" style="background:var(--neon-blue); padding:10px 18px;">Vincular Clave</button>
       </div>
-      <div id="accountsList">Cargando cuentas...</div>
+    </div>
+
+    <div class="grid">
+      <!-- Columna Izquierda: Formulario 3D -->
+      <div class="card-3d">
+        <div class="card-title">
+          <span>✨ Conectar Nueva Cuenta</span>
+          <span style="font-size:0.75rem; color:var(--neon-cyan);">Quantum Auth</span>
+        </div>
+        <div id="alertBox" class="alert-box"></div>
+
+        <form id="addForm">
+          <div class="form-group">
+            <label>Proveedor IA</label>
+            <select id="provider" class="form-control" onchange="onProviderChange()">
+              <option value="deepseek">🐳 DeepSeek (Oficial - api.deepseek.com)</option>
+              <option value="gemini">🔷 Google (Gemini 4 Argon / AI Studio)</option>
+              <option value="opencode-go">🌐 OpenCode Go (Zen API)</option>
+              <option value="nvidia">🟢 NVIDIA NIM (1,000 créditos / nvapi-...)</option>
+              <option value="nan">🟣 NaN Builders (Inferencia UE / Cluster abierto)</option>
+              <option value="groq">⚡ Groq Cloud (LPU ultra rápido)</option>
+              <option value="cerebras">🧠 Cerebras AI (Inferencia ultra rápida)</option>
+              <option value="mistral">🌪️ Mistral AI</option>
+              <option value="openai-compat">⚙️ Personalizado (OpenAI-compatible)</option>
+            </select>
+          </div>
+
+          <div id="providerPreview" class="provider-preview-card">
+            <!-- Dinámico -->
+          </div>
+
+          <div class="form-group">
+            <label>Etiqueta / Nombre de la Cuenta</label>
+            <input type="text" id="label" class="form-control" placeholder="Ej: DeepSeek Cuenta 1 - Wilox" required />
+          </div>
+
+          <div class="form-group">
+            <label id="apiKeyLabel">API Key de DeepSeek (sk-...)</label>
+            <input type="password" id="apiKey" class="form-control" placeholder="sk-..." required />
+          </div>
+
+          <!-- Selector de Logo Personalizado -->
+          <div class="form-group">
+            <label>Logo de la Cuenta</label>
+            <div class="logo-source-tabs">
+              <button type="button" class="logo-tab-btn active" id="tabLogoDefault" onclick="setLogoTab('default')">Predeterminado</button>
+              <button type="button" class="logo-tab-btn" id="tabLogoUrl" onclick="setLogoTab('url')">URL Externa</button>
+              <button type="button" class="logo-tab-btn" id="tabLogoUpload" onclick="setLogoTab('upload')">Subir Imagen</button>
+            </div>
+
+            <div id="logoUrlField" style="display:none; margin-top:8px;">
+              <input type="text" id="customLogoUrlInput" class="form-control" placeholder="https://ejemplo.com/logo.png" oninput="updateCustomLogoPreview(this.value)" />
+            </div>
+
+            <div id="logoUploadField" style="display:none; margin-top:8px;">
+              <div class="logo-upload-zone" onclick="document.getElementById('logoFileInput').click()">
+                <p>📁 Haz clic aquí para subir tu imagen PNG, SVG o WebP</p>
+                <input type="file" id="logoFileInput" accept="image/*" style="display:none;" onchange="handleLogoFileSelect(event)" />
+              </div>
+            </div>
+            <input type="hidden" id="finalCustomLogo" value="" />
+          </div>
+
+          <div class="form-group" id="prefixGroup" style="display:none;">
+            <label>Prefijo para Modelos (Opcional)</label>
+            <input type="text" id="prefix" class="form-control" placeholder="ej: myprov" />
+          </div>
+
+          <div class="form-group" id="baseUrlGroup" style="display:none;">
+            <label>Base URL Personalizada (Opcional)</label>
+            <input type="text" id="baseUrl" class="form-control" placeholder="https://api.ejemplo.com/v1" />
+          </div>
+
+          <button type="submit" class="btn-3d">
+            <span>⚡ Conectar y Desplegar Tarjeta</span>
+          </button>
+        </form>
+      </div>
+
+      <!-- Columna Derecha: Cuentas Conectadas 3D -->
+      <div class="card-3d">
+        <div class="card-title">
+          <span>📋 Cuentas Conectadas en CPAMC</span>
+          <button class="btn-refresh" onclick="loadAccounts()">🔄 Sincronizar</button>
+        </div>
+
+        <div class="filter-pills-row" id="filters">
+          <button class="filter-pill active" onclick="setFilter('all')">Todos</button>
+          <button class="filter-pill" onclick="setFilter('deepseek')">DeepSeek</button>
+          <button class="filter-pill" onclick="setFilter('gemini')">Google Gemini</button>
+          <button class="filter-pill" onclick="setFilter('opencode-go')">OpenCode</button>
+          <button class="filter-pill" onclick="setFilter('nvidia')">NVIDIA NIM</button>
+          <button class="filter-pill" onclick="setFilter('nan')">NaN Builders</button>
+          <button class="filter-pill" onclick="setFilter('groq')">Groq</button>
+          <button class="filter-pill" onclick="setFilter('cerebras')">Cerebras</button>
+          <button class="filter-pill" onclick="setFilter('otros')">Otros</button>
+        </div>
+
+        <div id="accountsList" class="accounts-grid">
+          <div class="skeleton-card"></div>
+          <div class="skeleton-card"></div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -993,19 +1564,61 @@ func getAccountsHTML() string {
     const apiUrl = "/v0/management/hub/accounts";
     let allAccounts = [];
     let currentFilter = "all";
+    let currentLogoTab = "default";
 
-    function getProviderLogo(provider) {
-      const p = (provider || "").toLowerCase();
-      if (p.includes("gemini") || p.includes("google") || p.includes("argon")) {
-        return '<img src="' + geminiArgonLogoBase64 + '" class="account-logo" alt="Google (Gemini 4 Argon)" />';
+    function setLogoTab(tab) {
+      currentLogoTab = tab;
+      document.getElementById("tabLogoDefault").classList.toggle("active", tab === "default");
+      document.getElementById("tabLogoUrl").classList.toggle("active", tab === "url");
+      document.getElementById("tabLogoUpload").classList.toggle("active", tab === "upload");
+
+      document.getElementById("logoUrlField").style.display = (tab === "url") ? "block" : "none";
+      document.getElementById("logoUploadField").style.display = (tab === "upload") ? "block" : "none";
+
+      if (tab === "default") {
+        document.getElementById("finalCustomLogo").value = "";
+        onProviderChange();
       }
-      if (p.includes("nvidia")) return '<div class="account-logo-placeholder" style="color:var(--nvidia);">🟢</div>';
-      if (p.includes("groq")) return '<div class="account-logo-placeholder" style="color:var(--groq);">⚡</div>';
-      if (p.includes("cerebras")) return '<div class="account-logo-placeholder" style="color:var(--cerebras);">🧠</div>';
-      if (p.includes("mistral")) return '<div class="account-logo-placeholder" style="color:var(--mistral);">🌪️</div>';
-      if (p.includes("nan")) return '<div class="account-logo-placeholder" style="color:var(--nan);">🟣</div>';
-      if (p.includes("opencode")) return '<div class="account-logo-placeholder" style="color:var(--success);">🌐</div>';
-      return '<div class="account-logo-placeholder" style="color:var(--primary);">⚙️</div>';
+    }
+
+    function handleLogoFileSelect(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = function(evt) {
+        const base64 = evt.target.result;
+        document.getElementById("finalCustomLogo").value = base64;
+        updateCustomLogoPreview(base64);
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function updateCustomLogoPreview(logoSrc) {
+      document.getElementById("finalCustomLogo").value = logoSrc;
+      const previewImg = document.querySelector("#providerPreview .preview-logo-box img");
+      if (previewImg && logoSrc) {
+        previewImg.src = logoSrc;
+      }
+    }
+
+    function getProviderLogo(provider, customLogo) {
+      if (customLogo && customLogo.trim() !== "") {
+        return '<div class="account-logo-frame"><img src="' + customLogo + '" alt="Custom Logo" /></div>';
+      }
+      const p = (provider || "").toLowerCase();
+      if (p.includes("deepseek")) {
+        return '<div class="account-logo-frame"><img src="' + deepseekLogoBase64 + '" alt="DeepSeek" /></div>';
+      }
+      if (p.includes("gemini") || p.includes("google") || p.includes("argon")) {
+        return '<div class="account-logo-frame"><img src="' + geminiArgonLogoBase64 + '" alt="Google (Gemini 4 Argon)" /></div>';
+      }
+      if (p.includes("nvidia")) return '<div class="account-logo-frame" style="color:var(--neon-green); font-size:1.6rem;">🟢</div>';
+      if (p.includes("groq")) return '<div class="account-logo-frame" style="color:var(--neon-amber); font-size:1.6rem;">⚡</div>';
+      if (p.includes("cerebras")) return '<div class="account-logo-frame" style="color:var(--neon-purple); font-size:1.6rem;">🧠</div>';
+      if (p.includes("mistral")) return '<div class="account-logo-frame" style="color:#fbbf24; font-size:1.6rem;">🌪️</div>';
+      if (p.includes("nan")) return '<div class="account-logo-frame" style="color:#c084fc; font-size:1.6rem;">🟣</div>';
+      if (p.includes("opencode")) return '<div class="account-logo-frame" style="color:var(--neon-cyan); font-size:1.6rem;">🌐</div>';
+      return '<div class="account-logo-frame" style="color:var(--neon-blue); font-size:1.6rem;">⚙️</div>';
     }
 
     function onProviderChange() {
@@ -1015,64 +1628,81 @@ func getAccountsHTML() string {
       const prefixGroup = document.getElementById("prefixGroup");
       const baseUrlGroup = document.getElementById("baseUrlGroup");
       const preview = document.getElementById("providerPreview");
+      const customLogo = document.getElementById("finalCustomLogo").value;
+
+      let defaultLogo = deepseekLogoBase64;
+      let title = "DeepSeek Oficial";
+      let desc = "Acceso directo a api.deepseek.com para deepseek-chat (V3) y deepseek-reasoner (R1)";
 
       if (p === "gemini") {
-        preview.innerHTML = '<img src="' + geminiArgonLogoBase64 + '" alt="Gemini 4 Argon Logo" /><div><div class="provider-preview-title">Google (Gemini 4 Argon)</div><div class="provider-preview-desc">Inferencia de última generación con soporte para Gemini 4 Argon y modelos 2.0/1.5</div></div>';
-        preview.style.display = "flex";
+        defaultLogo = geminiArgonLogoBase64;
+        title = "Google (Gemini 4 Argon)";
+        desc = "Inferencia multimodal de vanguardia y modelos 2.0/1.5 Pro en Google AI Studio";
         keyLabel.textContent = "API Key de Google (Gemini 4 Argon / AIzaSy...)";
         keyInput.placeholder = "AIzaSy...";
         prefixGroup.style.display = "none";
         baseUrlGroup.style.display = "none";
+      } else if (p === "deepseek") {
+        defaultLogo = deepseekLogoBase64;
+        title = "DeepSeek Oficial";
+        desc = "Acceso directo a api.deepseek.com para deepseek-chat (V3) y deepseek-reasoner (R1)";
+        keyLabel.textContent = "API Key de DeepSeek (sk-...)";
+        keyInput.placeholder = "sk-...";
+        prefixGroup.style.display = "none";
+        baseUrlGroup.style.display = "none";
       } else if (p === "nvidia") {
-        preview.innerHTML = '<div class="account-logo-placeholder" style="color:var(--nvidia);">🟢</div><div><div class="provider-preview-title">NVIDIA NIM</div><div class="provider-preview-desc">1,000 créditos API gratuitos con catálogo de inferencia empresarial</div></div>';
-        preview.style.display = "flex";
+        title = "NVIDIA NIM";
+        desc = "Catálogo de microservicios de inferencia empresarial con 1,000 créditos gratis";
         keyLabel.textContent = "NVIDIA API Key (nvapi-...)";
         keyInput.placeholder = "nvapi-...";
         prefixGroup.style.display = "none";
         baseUrlGroup.style.display = "none";
       } else if (p === "nan") {
-        preview.innerHTML = '<div class="account-logo-placeholder" style="color:var(--nan);">🟣</div><div><div class="provider-preview-title">NaN Builders</div><div class="provider-preview-desc">Inferencia ultrarrápida en Europa (DeepSeek V4, GLM, MiMo, Qwen)</div></div>';
-        preview.style.display = "flex";
+        title = "NaN Builders";
+        desc = "Inferencia ultrarrápida europea de código abierto (DeepSeek, GLM, MiMo, Qwen)";
         keyLabel.textContent = "API Key de NaN Builders";
         keyInput.placeholder = "API Key personal de nan.builders...";
         prefixGroup.style.display = "none";
         baseUrlGroup.style.display = "none";
       } else if (p === "groq") {
-        preview.innerHTML = '<div class="account-logo-placeholder" style="color:var(--groq);">⚡</div><div><div class="provider-preview-title">Groq Cloud</div><div class="provider-preview-desc">LPU de latencia ultra baja para Llama 3.3 y Mixtral</div></div>';
-        preview.style.display = "flex";
+        title = "Groq Cloud";
+        desc = "LPU de latencia ultra baja para Llama 3.3 70B y Mixtral";
         keyLabel.textContent = "Groq Cloud API Key (gsk_...)";
         keyInput.placeholder = "gsk_...";
         prefixGroup.style.display = "none";
         baseUrlGroup.style.display = "none";
       } else if (p === "cerebras") {
-        preview.innerHTML = '<div class="account-logo-placeholder" style="color:var(--cerebras);">🧠</div><div><div class="provider-preview-title">Cerebras AI</div><div class="provider-preview-desc">Inferencia Wafer-Scale ultra veloz (>1500 tokens/s)</div></div>';
-        preview.style.display = "flex";
+        title = "Cerebras AI";
+        desc = "Inferencia Wafer-Scale masiva a ultra alta velocidad (>1500 tokens/s)";
         keyLabel.textContent = "Cerebras API Key (csk-...)";
         keyInput.placeholder = "csk-...";
         prefixGroup.style.display = "none";
         baseUrlGroup.style.display = "none";
       } else if (p === "mistral") {
-        preview.innerHTML = '<div class="account-logo-placeholder" style="color:var(--mistral);">🌪️</div><div><div class="provider-preview-title">Mistral AI</div><div class="provider-preview-desc">Modelos Mistral Large, Codestral y Pixtral</div></div>';
-        preview.style.display = "flex";
+        title = "Mistral AI";
+        desc = "Modelos Mistral Large 2, Codestral y Pixtral de última generación";
         keyLabel.textContent = "Mistral API Key";
         keyInput.placeholder = "API Key de Mistral...";
         prefixGroup.style.display = "none";
         baseUrlGroup.style.display = "none";
       } else if (p === "openai-compat") {
-        preview.innerHTML = '<div class="account-logo-placeholder" style="color:var(--primary);">⚙️</div><div><div class="provider-preview-title">OpenAI Compatible</div><div class="provider-preview-desc">Cualquier servidor o gateway local / remoto con formato OpenAI</div></div>';
-        preview.style.display = "flex";
+        title = "OpenAI Compatible";
+        desc = "Cualquier servidor o gateway local / remoto con formato OpenAI";
         keyLabel.textContent = "API Key o Token";
         keyInput.placeholder = "sk-...";
         prefixGroup.style.display = "block";
         baseUrlGroup.style.display = "block";
       } else {
-        preview.innerHTML = '<div class="account-logo-placeholder" style="color:var(--success);">🌐</div><div><div class="provider-preview-title">OpenCode Go (Zen API)</div><div class="provider-preview-desc">Pool de modelos premium multi-proveedor</div></div>';
-        preview.style.display = "flex";
+        title = "OpenCode Go (Zen API)";
+        desc = "Pool de modelos de programación e investigación de élite";
         keyLabel.textContent = "API Key de OpenCode (oc_sk_...)";
         keyInput.placeholder = "oc_sk_...";
         prefixGroup.style.display = "none";
         baseUrlGroup.style.display = "none";
       }
+
+      const activeLogoSrc = customLogo || defaultLogo;
+      preview.innerHTML = '<div class="preview-logo-box"><img src="' + activeLogoSrc + '" alt="Logo" /></div><div><div class="preview-title">' + title + '</div><div class="preview-desc">' + desc + '</div></div>';
     }
 
     function deobfuscateCPAMC(raw) {
@@ -1106,6 +1736,11 @@ func getAccountsHTML() string {
     }
 
     function getManagementKey() {
+      // 1. Check user manual override in localStorage
+      const localManual = localStorage.getItem("omniauth_manual_key");
+      if (localManual) return localManual;
+
+      // 2. Check parent window storage (CPAMC standard)
       try {
         if (window.parent && window.parent.localStorage) {
           const raw = window.parent.localStorage.getItem("cli-proxy-auth");
@@ -1116,6 +1751,7 @@ func getAccountsHTML() string {
         }
       } catch (e) {}
 
+      // 3. Check current window storage
       try {
         const raw = localStorage.getItem("cli-proxy-auth");
         if (raw) {
@@ -1125,6 +1761,14 @@ func getAccountsHTML() string {
       } catch (e) {}
 
       return "";
+    }
+
+    function saveManualKey() {
+      const k = document.getElementById("manualSecretKey").value.trim();
+      if (!k) return;
+      localStorage.setItem("omniauth_manual_key", k);
+      document.getElementById("sessionBanner").style.display = "none";
+      loadAccounts();
     }
 
     async function apiFetch(endpoint, options = {}) {
@@ -1138,14 +1782,15 @@ func getAccountsHTML() string {
 
     function setFilter(f) {
       currentFilter = f;
-      document.querySelectorAll("#filters .filter-btn").forEach(btn => {
-        btn.classList.toggle("active", btn.getAttribute("onclick").includes(f));
+      document.querySelectorAll("#filters .filter-pill").forEach(btn => {
+        btn.classList.toggle("active", btn.getAttribute("onclick").includes("'" + f + "'"));
       });
       renderAccounts();
     }
 
     function getProviderBadge(provider) {
-      p = (provider || "opencode-go").toLowerCase();
+      const p = (provider || "opencode-go").toLowerCase();
+      if (p.includes("deepseek")) return '<span class="badge badge-deepseek">DEEPSEEK</span>';
       if (p.includes("gemini") || p.includes("google") || p.includes("argon")) return '<span class="badge badge-gemini">GOOGLE (GEMINI 4 ARGON)</span>';
       if (p.includes("nvidia")) return '<span class="badge badge-nvidia">NVIDIA NIM</span>';
       if (p.includes("groq")) return '<span class="badge badge-groq">GROQ</span>';
@@ -1157,7 +1802,8 @@ func getAccountsHTML() string {
     }
 
     function getModelsHint(provider) {
-      p = (provider || "").toLowerCase();
+      const p = (provider || "").toLowerCase();
+      if (p.includes("deepseek")) return "🐳 deepseek-chat (V3), deepseek-reasoner (R1)";
       if (p.includes("gemini") || p.includes("google") || p.includes("argon")) return "🔷 Google (Gemini 4 Argon), Gemini 2.0 Flash/Pro, Gemini 1.5 Pro, Experimental";
       if (p.includes("nvidia")) return "✨ Llama 3.3 70B, Kimi K2.5, Nemotron Ultra, DeepSeek R1, Qwen 2.5 Coder";
       if (p.includes("groq")) return "⚡ Llama 3.3 70B Versatile, Llama 3.1 8B Instant, Mixtral";
@@ -1173,29 +1819,33 @@ func getAccountsHTML() string {
       let list = allAccounts;
       if (currentFilter !== "all") {
         if (currentFilter === "otros") {
-          list = list.filter(a => !["opencode-go", "nvidia", "nan", "groq", "cerebras"].includes(a.provider));
+          list = list.filter(a => !["opencode-go", "nvidia", "nan", "groq", "cerebras", "deepseek", "gemini"].includes(a.provider));
         } else {
           list = list.filter(a => (a.provider || "").toLowerCase().includes(currentFilter));
         }
       }
 
       if (!list || list.length === 0) {
-        listDiv.innerHTML = '<p style="color:var(--muted); font-size:0.9rem;">No hay cuentas conectadas en esta categoría.</p>';
+        listDiv.innerHTML = '<div style="padding:32px; text-align:center; color:var(--text-muted); font-size:0.95rem; border:1px dashed var(--glass-border); border-radius:16px;">🌱 No hay cuentas conectadas en esta categoría. Puedes añadir una usando el formulario lateral.</div>';
         return;
       }
 
       listDiv.innerHTML = list.map(acc => ` + "`" + `
-        <div class="account-card">
+        <div class="account-card-3d">
           <div class="account-main">
-            ${getProviderLogo(acc.provider)}
+            ${getProviderLogo(acc.provider, acc.custom_logo)}
             <div class="account-info">
               <h3>${acc.label || 'Cuenta'} ${getProviderBadge(acc.provider)}</h3>
-              <p>Key: ${acc.key_mask} | Prefijo: ${acc.prefix || 'defecto'} | Archivo: ${acc.id}</p>
+              <div class="account-meta">
+                <span class="meta-tag">Key: ${acc.key_mask}</span>
+                <span class="meta-tag">Prefijo: ${acc.prefix || 'defecto'}</span>
+                <span class="meta-tag">Archivo: ${acc.id}</span>
+              </div>
               <div class="models-hint">${getModelsHint(acc.provider)}</div>
             </div>
           </div>
           <div>
-            <button class="btn btn-danger" onclick="deleteAccount('${acc.id}')">🗑️ Quitar</button>
+            <button class="btn-delete" onclick="deleteAccount('${acc.id}')">🗑️ Quitar</button>
           </div>
         </div>
       ` + "`" + `).join("");
@@ -1203,31 +1853,41 @@ func getAccountsHTML() string {
 
     async function loadAccounts() {
       const listDiv = document.getElementById("accountsList");
-      const key = getManagementKey();
-      if (!key) {
-        listDiv.innerHTML = ` + "`" + `
-          <div style="background:rgba(245, 158, 11, 0.1); border:1px solid #f59e0b; border-radius:6px; padding:12px; font-size:0.85rem; color:#fde68a;">
-            <strong>⚠️ Se requiere sesión recordada en CPAMC</strong>
-            <p style="margin-top:6px; color:var(--muted);">Para que los plugins dentro del panel puedan comunicarse con la API de administración, asegúrate de iniciar sesión en CPAMC marcando la casilla <strong>"Remember password"</strong> (Recordar contraseña).</p>
-          </div>
-        ` + "`" + `;
-        return;
-      }
+      const statusText = document.getElementById("authStatusText");
+      const statusIndicator = document.getElementById("authStatusIndicator");
 
       try {
         const res = await apiFetch(apiUrl, { method: "GET" });
         if (res.status === 401) {
-          listDiv.innerHTML = '<p style="color:var(--danger)">Sesión no autorizada (401). Vuelve a iniciar sesión en CPAMC con "Remember password".</p>';
+          statusText.textContent = "Sesión no vinculada (401)";
+          statusIndicator.style.borderColor = "rgba(239, 68, 68, 0.4)";
+          statusIndicator.style.background = "rgba(239, 68, 68, 0.15)";
+          statusIndicator.style.color = "#f87171";
+          document.getElementById("sessionBanner").style.display = "block";
+          listDiv.innerHTML = '<div style="padding:24px; text-align:center; color:#f87171;">Introduce tu Management Key arriba para sincronizar las cuentas.</div>';
           return;
         }
+
         if (!res.ok) {
           throw new Error("HTTP " + res.status + " " + res.statusText);
         }
+
         const data = await res.json();
         allAccounts = data.accounts || [];
+
+        statusText.textContent = "Conectado a CPAMC (" + allAccounts.length + " cuentas)";
+        statusIndicator.style.borderColor = "rgba(16, 185, 129, 0.4)";
+        statusIndicator.style.background = "rgba(16, 185, 129, 0.15)";
+        statusIndicator.style.color = "#34d399";
+        document.getElementById("sessionBanner").style.display = "none";
+
         renderAccounts();
       } catch (err) {
-        listDiv.innerHTML = '<p style="color:var(--danger)">Error al cargar cuentas: ' + err.message + '</p>';
+        statusText.textContent = "Modo Autónomo";
+        statusIndicator.style.borderColor = "rgba(245, 158, 11, 0.4)";
+        statusIndicator.style.background = "rgba(245, 158, 11, 0.15)";
+        statusIndicator.style.color = "#fbbf24";
+        document.getElementById("sessionBanner").style.display = "block";
       }
     }
 
@@ -1238,9 +1898,7 @@ func getAccountsHTML() string {
           method: "DELETE",
           body: JSON.stringify({ id })
         });
-        if (!res.ok) {
-          throw new Error("HTTP " + res.status);
-        }
+        if (!res.ok) throw new Error("HTTP " + res.status);
         const data = await res.json();
         if (data.ok) {
           showAlert("Cuenta eliminada correctamente", "success");
@@ -1261,12 +1919,21 @@ func getAccountsHTML() string {
       const apiKey = document.getElementById("apiKey").value;
       const prefix = document.getElementById("prefix").value;
       const baseUrl = document.getElementById("baseUrl").value;
+      const customLogo = document.getElementById("finalCustomLogo").value;
 
       try {
         const res = await apiFetch(apiUrl, {
           method: "POST",
-          body: JSON.stringify({ provider, label, api_key: apiKey, prefix, base_url: baseUrl })
+          body: JSON.stringify({
+            provider,
+            label,
+            api_key: apiKey,
+            prefix,
+            base_url: baseUrl,
+            custom_logo: customLogo
+          })
         });
+
         if (!res.ok) {
           const errText = await res.text();
           let msg = "HTTP " + res.status;
@@ -1277,10 +1944,13 @@ func getAccountsHTML() string {
           showAlert(msg, "error");
           return;
         }
+
         const data = await res.json();
         if (data.ok) {
-          showAlert("¡Cuenta de " + provider + " conectada con éxito! Ya visible en Auth Files.", "success");
+          showAlert("¡Cuenta de " + provider + " conectada con éxito! Ya activa en CPAMC.", "success");
           document.getElementById("addForm").reset();
+          document.getElementById("finalCustomLogo").value = "";
+          setLogoTab('default');
           onProviderChange();
           apiFetch("/v0/management/auth-files/refresh", { method: "POST" }).catch(() => {});
           loadAccounts();
@@ -1293,9 +1963,9 @@ func getAccountsHTML() string {
     });
 
     function showAlert(msg, type) {
-      const el = document.getElementById("alert");
+      const el = document.getElementById("alertBox");
       el.textContent = msg;
-      el.className = "alert alert-" + type;
+      el.className = "alert-box " + type;
       el.style.display = "block";
       setTimeout(() => { el.style.display = "none"; }, 4000);
     }
